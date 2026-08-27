@@ -1,6 +1,6 @@
 {
-  "name": "brand-ai-readiness-audit",
-  "version": "1.0.0",
+  "name": "brand-ai-readiness-audit | Adobe",
+  "team": "Kasukabe Defense Group",
   "skills": [
     { "id": "audit-orchestrator", "path": "skills/audit-orchestrator", "entrypoint": true },
     { "id": "crawl-access-audit", "path": "skills/crawl-access-audit" },

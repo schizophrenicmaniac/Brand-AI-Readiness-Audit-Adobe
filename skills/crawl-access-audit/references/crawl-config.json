@@ -1,0 +1,49 @@
+{
+  "_description": "Shared configuration for all crawl-access-audit scripts. Single source of truth for tunable thresholds, suppressed paths, critical paths, and tracking parameters. All scripts load this file at startup.",
+  "_last_updated": "2026-08-27",
+
+  "robots": {
+    "suppressed_paths": [
+      "/wp-admin", "/wp-admin/", "/admin", "/admin/", "/cgi-bin", "/cgi-bin/",
+      "/tmp", "/tmp/", "/staging", "/staging/", "/internal", "/internal/",
+      "/api/", "/?s=", "/search", "/xmlrpc.php", "/wp-login.php",
+      "/wp-includes/", "/wp-content/plugins/", "/.env", "/server-status"
+    ],
+    "default_critical_paths": [
+      "/", "/products", "/pricing", "/blog", "/about", "/contact",
+      "/services", "/solutions", "/features", "/docs", "/support",
+      "/help", "/faq", "/store", "/shop"
+    ],
+    "crawl_delay_thresholds": {
+      "high_seconds": 30,
+      "medium_seconds": 10,
+      "low_seconds": 5
+    }
+  },
+
+  "sitemap": {
+    "max_sitemaps_to_process": 20,
+    "max_urls_to_parse": 100000,
+    "max_urls_per_file": 50000,
+    "default_sample_size": 20,
+    "stale_lastmod_threshold_days": 365,
+    "tracking_params": [
+      "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+      "fbclid", "gclid", "msclkid", "ref", "affiliate", "mc_cid", "mc_eid",
+      "_ga", "_gl", "yclid", "twclid", "li_fat_id"
+    ],
+    "parameter_proliferation_min_variants": 10
+  },
+
+  "page_fetch": {
+    "default_max_pages": 50,
+    "default_max_depth": 4,
+    "default_timeout_seconds": 15,
+    "ttfb_thresholds": {
+      "critical_seconds": 10,
+      "high_seconds": 5,
+      "medium_seconds": 3
+    },
+    "cert_expiry_warning_days": 30
+  }
+}

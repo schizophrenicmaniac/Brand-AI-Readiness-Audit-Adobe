@@ -1,0 +1,85 @@
+{
+  "_description": "Bot-protection challenge page signatures and soft-404 text patterns. Single source of truth used by scripts/page_fetcher.py and documented in references/crawl-checks-detail.md.",
+  "_last_updated": "2026-08-27",
+
+  "challenge_signatures": {
+    "cloudflare": {
+      "title_patterns": [
+        "just a moment",
+        "attention required",
+        "checking your browser"
+      ],
+      "body_patterns": [
+        "cf-browser-verification",
+        "challenges.cloudflare.com",
+        "cloudflare ray id",
+        "data-ray=",
+        "__cf_bm",
+        "cf-turnstile"
+      ],
+      "header_patterns": {
+        "server": "cloudflare",
+        "cf-ray": null
+      }
+    },
+    "akamai": {
+      "title_patterns": [],
+      "body_patterns": [
+        "_abck",
+        "ak_bmsc",
+        "akamaighost",
+        "_akamaiclientdata",
+        "akamaized.net"
+      ],
+      "header_patterns": {
+        "x-akamai-transformed": null,
+        "akamai-grn": null
+      }
+    },
+    "imperva": {
+      "title_patterns": [],
+      "body_patterns": [
+        "incap_ses_",
+        "visid_incap_",
+        "_incapsula_resource",
+        "incapsula incident id"
+      ],
+      "header_patterns": {}
+    },
+    "captcha": {
+      "title_patterns": [],
+      "body_patterns": [
+        "g-recaptcha",
+        "google.com/recaptcha",
+        "h-captcha",
+        "hcaptcha.com"
+      ],
+      "header_patterns": {}
+    }
+  },
+
+  "soft_404_patterns": [
+    "page not found",
+    "not found",
+    "does not exist",
+    "no longer available",
+    "we couldn't find",
+    "this page has been removed",
+    "page has moved",
+    "oops",
+    "nothing here",
+    "page you requested",
+    "page doesn't exist"
+  ],
+
+  "soft_404_title_indicators": [
+    "404",
+    "not found",
+    "error",
+    "page missing"
+  ],
+
+  "soft_404_min_body_chars": 200,
+  "js_redirect_max_body_chars": 1500,
+  "js_redirect_min_text_chars": 100
+}

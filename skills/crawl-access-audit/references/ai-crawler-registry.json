@@ -1,0 +1,28 @@
+{
+  "_description": "AI crawler user-agent registry. Single source of truth for bot classification. Used by scripts/robots_analyzer.py and documented in references/ai-crawler-registry.md. Update here to add new bots — both the script and the markdown reference will reflect the change.",
+  "_last_updated": "2026-08-27",
+  "bots": {
+    "oai-searchbot":      {"category": "search_bot",   "operator": "OpenAI",       "product": "ChatGPT Search",          "impact": "critical"},
+    "chatgpt-user":       {"category": "search_bot",   "operator": "OpenAI",       "product": "ChatGPT Live Browsing",   "impact": "critical"},
+    "claude-searchbot":   {"category": "search_bot",   "operator": "Anthropic",    "product": "Claude Search",           "impact": "critical"},
+    "claude-web":         {"category": "search_bot",   "operator": "Anthropic",    "product": "Claude Web Access",       "impact": "critical"},
+    "perplexitybot":      {"category": "search_bot",   "operator": "Perplexity",   "product": "Perplexity Answer Engine","impact": "critical"},
+    "applebot":           {"category": "search_bot",   "operator": "Apple",        "product": "Siri / Spotlight",        "impact": "high"},
+    "googlebot":          {"category": "search_bot",   "operator": "Google",       "product": "Google Search / AI Overviews","impact": "critical"},
+    "bingbot":            {"category": "search_bot",   "operator": "Microsoft",    "product": "Bing / Copilot",          "impact": "critical"},
+    "yandexbot":          {"category": "search_bot",   "operator": "Yandex",       "product": "Yandex Search",           "impact": "high"},
+    "duckduckbot":        {"category": "search_bot",   "operator": "DuckDuckGo",   "product": "DuckDuckGo / DDG AI Chat","impact": "high"},
+    "gptbot":             {"category": "training_bot", "operator": "OpenAI",       "product": "Pre-training",            "impact": "info"},
+    "claudebot":          {"category": "training_bot", "operator": "Anthropic",    "product": "Training",                "impact": "info"},
+    "google-extended":    {"category": "training_bot", "operator": "Google",       "product": "Gemini Training",         "impact": "info"},
+    "ccbot":              {"category": "training_bot", "operator": "Common Crawl", "product": "Open Dataset",            "impact": "info"},
+    "bytespider":         {"category": "training_bot", "operator": "ByteDance",    "product": "TikTok / Training",       "impact": "info"},
+    "meta-externalagent": {"category": "training_bot", "operator": "Meta",         "product": "Meta AI Training",        "impact": "info"},
+    "applebot-extended":  {"category": "training_bot", "operator": "Apple",        "product": "Apple Intelligence Training","impact": "info"},
+    "amazonbot":          {"category": "training_bot", "operator": "Amazon",       "product": "Alexa / Amazon AI",       "impact": "info"},
+    "facebookexternalhit":{"category": "training_bot", "operator": "Meta",         "product": "Link Preview / Training", "impact": "info"},
+    "cohere-ai":          {"category": "training_bot", "operator": "Cohere",       "product": "Model Training",          "impact": "info"},
+    "ai2bot":             {"category": "training_bot", "operator": "Allen AI",     "product": "Research Training",       "impact": "info"},
+    "diffbot":            {"category": "training_bot", "operator": "Diffbot",      "product": "Knowledge Graph",         "impact": "low"}
+  }
+}
