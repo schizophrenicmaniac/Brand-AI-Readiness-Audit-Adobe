@@ -1,0 +1,149 @@
+{
+  "_description": "Detection signatures for SPA frameworks, icon font libraries, tab/accordion UI patterns, and infinite scroll markers. Used by scripts to classify opaque and interaction-gated content.",
+  "_last_updated": "2026-08-28",
+
+  "spa_frameworks": {
+    "react": {
+      "html_markers": ["data-reactroot", "data-reactid", "__react", "react-root"],
+      "script_markers": ["react.production.min.js", "react-dom", "react.development.js"],
+      "meta_markers": ["__NEXT_DATA__", "_next/static", "_next/image"],
+      "ssr_indicators": ["data-reactroot", "__NEXT_DATA__"],
+      "framework_label": "React"
+    },
+    "next": {
+      "html_markers": ["__NEXT_DATA__", "__next", "data-nextjs-page"],
+      "script_markers": ["_next/static", "_next/webpack", "next/dist"],
+      "meta_markers": ["__NEXT_DATA__"],
+      "ssr_indicators": ["__NEXT_DATA__", "__next"],
+      "framework_label": "Next.js"
+    },
+    "vue": {
+      "html_markers": ["data-v-", "__vue__", "data-server-rendered"],
+      "script_markers": ["vue.min.js", "vue.runtime", "vue.global"],
+      "meta_markers": ["__NUXT__", "_nuxt/"],
+      "ssr_indicators": ["data-server-rendered", "__NUXT__"],
+      "framework_label": "Vue"
+    },
+    "nuxt": {
+      "html_markers": ["__NUXT__", "__nuxt", "data-n-head"],
+      "script_markers": ["_nuxt/", "nuxt.js"],
+      "meta_markers": ["__NUXT__"],
+      "ssr_indicators": ["__NUXT__", "data-server-rendered"],
+      "framework_label": "Nuxt"
+    },
+    "angular": {
+      "html_markers": ["ng-version", "_nghost", "_ngcontent", "ng-app"],
+      "script_markers": ["angular.min.js", "polyfills", "runtime.js", "main.js"],
+      "meta_markers": [],
+      "ssr_indicators": ["ng-version"],
+      "framework_label": "Angular"
+    },
+    "svelte": {
+      "html_markers": ["svelte-", "__svelte"],
+      "script_markers": ["svelte/internal", ".svelte-kit"],
+      "meta_markers": [],
+      "ssr_indicators": ["__sveltekit"],
+      "framework_label": "Svelte/SvelteKit"
+    },
+    "gatsby": {
+      "html_markers": ["___gatsby", "gatsby-"],
+      "script_markers": ["gatsby-", "commons.js", "app.js"],
+      "meta_markers": ["___gatsby"],
+      "ssr_indicators": ["___gatsby"],
+      "framework_label": "Gatsby"
+    },
+    "astro": {
+      "html_markers": ["astro-island", "data-astro-cid"],
+      "script_markers": ["astro/"],
+      "meta_markers": [],
+      "ssr_indicators": ["astro-island"],
+      "framework_label": "Astro"
+    },
+    "remix": {
+      "html_markers": ["__remix", "__remixContext"],
+      "script_markers": ["remix", "__remixManifest"],
+      "meta_markers": ["__remixContext"],
+      "ssr_indicators": ["__remixContext"],
+      "framework_label": "Remix"
+    }
+  },
+
+  "tab_accordion_patterns": {
+    "aria_roles": ["tablist", "tabpanel", "tab"],
+    "aria_attributes_hidden": ["aria-hidden=\"true\"", "aria-expanded=\"false\""],
+    "aria_attributes_visible": ["aria-hidden=\"false\"", "aria-expanded=\"true\"", "aria-selected=\"true\""],
+    "css_classes": [
+      "tab-pane", "tab-content", "nav-tabs", "nav-pills",
+      "accordion-body", "accordion-collapse", "accordion-item",
+      "collapse", "collapsing", "panel-body", "panel-collapse",
+      "MuiAccordion", "MuiTab", "MuiTabs", "MuiTabPanel",
+      "MuiCollapse", "MuiAccordionDetails",
+      "ant-collapse", "ant-collapse-content", "ant-tabs", "ant-tabs-tabpane",
+      "chakra-accordion", "chakra-tabs", "chakra-collapse",
+      "el-tabs", "el-collapse", "el-tab-pane",
+      "v-expansion-panel", "v-tab-item",
+      "rc-collapse", "rc-tabs"
+    ],
+    "html5_elements": ["details", "summary"],
+    "data_attributes": ["data-toggle=\"tab\"", "data-toggle=\"collapse\"",
+                         "data-bs-toggle=\"tab\"", "data-bs-toggle=\"collapse\""]
+  },
+
+  "infinite_scroll_markers": {
+    "data_attributes": [
+      "data-infinite-scroll", "data-load-more",
+      "infinite-scroll-component", "data-infinite",
+      "data-paginate", "data-next-page"
+    ],
+    "css_classes": [
+      "infinite-scroll", "infinite-scroll-container",
+      "load-more", "load-more-btn", "load-more-button",
+      "infinite-loader", "scroll-sentinel",
+      "waypoint", "lazy-load-trigger",
+      "pagination-more", "show-more"
+    ],
+    "button_text_patterns": [
+      "load more", "show more", "see more", "view more",
+      "load all", "show all", "view all",
+      "next page", "load next"
+    ]
+  },
+
+  "icon_font_signatures": {
+    "material_icons": {
+      "classes": ["material-icons", "material-icons-outlined",
+                   "material-icons-round", "material-icons-sharp",
+                   "material-symbols-outlined", "material-symbols-rounded",
+                   "material-symbols-sharp"],
+      "stylesheet_patterns": ["fonts.googleapis.com/icon", "fonts.googleapis.com/css.*Material"],
+      "ligature_risk": true,
+      "description": "Material Icons use ligatures — the element text content is the icon name (e.g., 'thumb_up'). Crawlers will extract these as visible text."
+    },
+    "font_awesome": {
+      "classes": ["fa", "fas", "far", "fab", "fal", "fad",
+                   "fa-solid", "fa-regular", "fa-brands",
+                   "fa-light", "fa-duotone", "fa-thin"],
+      "stylesheet_patterns": ["font-awesome", "fontawesome", "cdnjs.cloudflare.com/ajax/libs/font-awesome"],
+      "ligature_risk": false,
+      "description": "Font Awesome uses CSS pseudo-elements (::before) with Unicode code points. Low ligature risk but icon text may appear in some extractors."
+    },
+    "bootstrap_icons": {
+      "classes": ["bi", "bi-"],
+      "stylesheet_patterns": ["bootstrap-icons"],
+      "ligature_risk": false,
+      "description": "Bootstrap Icons use SVG or font with CSS class-based code points."
+    },
+    "glyphicons": {
+      "classes": ["glyphicon", "glyphicon-"],
+      "stylesheet_patterns": ["glyphicons"],
+      "ligature_risk": false,
+      "description": "Bootstrap 3 Glyphicons. Legacy but still found on older sites."
+    },
+    "icomoon": {
+      "classes": ["icon-", "icomoon"],
+      "stylesheet_patterns": ["icomoon"],
+      "ligature_risk": false,
+      "description": "IcoMoon custom icon fonts."
+    }
+  }
+}

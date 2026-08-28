@@ -1,0 +1,83 @@
+{
+  "_description": "Shared configuration for render-extraction-audit scripts. Single source of truth for tunable thresholds, suppressed patterns, and detection limits. All scripts load this file at startup.",
+  "_last_updated": "2026-08-28",
+
+  "html_fetch": {
+    "default_max_pages": 10,
+    "default_timeout_seconds": 15,
+    "spa_shell_max_body_text_chars": 200,
+    "min_noscript_quality_chars": 100,
+    "boilerplate_ratio_threshold": 0.30,
+    "min_main_content_chars": 100,
+    "pdf_summary_min_chars": 50
+  },
+
+  "rendered_dom": {
+    "default_max_pages": 10,
+    "page_timeout_ms": 30000,
+    "network_idle_timeout_ms": 5000,
+    "dom_snapshot_delay_ms": 500,
+    "min_js_dependent_text_chars": 50,
+    "shadow_dom_scan_enabled": true
+  },
+
+  "image_alt": {
+    "generic_alt_patterns": [
+      "image", "photo", "picture", "img", "untitled", "placeholder",
+      "banner", "hero", "screenshot", "graphic", "icon", "logo",
+      "default", "thumbnail", "thumb", "pic", "figure"
+    ],
+    "filename_alt_regex": "\\.(jpe?g|png|gif|webp|svg|bmp|tiff?|avif)$",
+    "min_descriptive_alt_chars": 5,
+    "max_alt_chars": 300,
+    "decorative_indicators": [
+      "role=\"presentation\"",
+      "role=\"none\"",
+      "aria-hidden=\"true\""
+    ]
+  },
+
+  "icon_fonts": {
+    "known_library_classes": [
+      "material-icons", "material-icons-outlined", "material-icons-round",
+      "material-icons-sharp", "material-symbols", "material-symbols-outlined",
+      "fa", "fas", "far", "fab", "fal", "fad", "fa-solid", "fa-regular",
+      "fa-brands", "fa-light", "fa-duotone",
+      "glyphicon", "glyphicons",
+      "icon-", "icomoon",
+      "dashicons", "dashicons-before",
+      "genericons", "genericon",
+      "bi", "bi-"
+    ],
+    "ligature_risk_libraries": [
+      "material-icons", "material-icons-outlined", "material-icons-round",
+      "material-icons-sharp", "material-symbols", "material-symbols-outlined"
+    ]
+  },
+
+  "suppressed_iframe_sources": [
+    "google.com/maps",
+    "youtube.com", "youtube-nocookie.com",
+    "vimeo.com", "player.vimeo.com",
+    "facebook.com/plugins", "facebook.com/v",
+    "twitter.com", "x.com", "platform.twitter.com",
+    "instagram.com",
+    "linkedin.com",
+    "googletagmanager.com", "google-analytics.com",
+    "doubleclick.net", "googlesyndication.com",
+    "disqus.com", "spot.im",
+    "recaptcha", "hcaptcha.com",
+    "typeform.com",
+    "calendly.com",
+    "intercom.io", "drift.com", "crisp.chat",
+    "hotjar.com", "clarity.ms"
+  ],
+
+  "suppressed_image_patterns": {
+    "src_substrings": [
+      "spacer", "pixel", "blank", "transparent", "1x1",
+      "tracking", "beacon", "analytics"
+    ],
+    "dimensional_max_px": 5
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "_description": "Patterns that identify key facts in extracted text. Used to escalate severity when these facts are found only in JS-rendered or opaque-media content. Loaded by scripts at runtime.",
+  "_last_updated": "2026-08-28",
+
+  "categories": {
+    "pricing": {
+      "label": "Pricing / Cost",
+      "patterns": [
+        "\\$\\d", "€\\d", "£\\d", "¥\\d", "₹\\d",
+        "\\bprice\\b", "\\bpricing\\b", "\\bcost\\b", "\\bfee\\b",
+        "\\bplan\\b", "\\bsubscription\\b",
+        "per month", "/mo", "/yr", "/year",
+        "starting at", "starts at", "from \\$",
+        "free trial", "free tier", "free plan",
+        "\\bquote\\b", "\\bestimate\\b",
+        "add to cart", "buy now", "purchase"
+      ],
+      "severity_if_opaque": "critical",
+      "severity_if_js_only": "high"
+    },
+    "contact": {
+      "label": "Contact Information",
+      "patterns": [
+        "\\bphone\\b", "\\bemail\\b", "\\bcontact\\b",
+        "\\baddress\\b", "\\bhours\\b", "\\bschedule\\b",
+        "call us", "reach us", "get in touch",
+        "\\bsupport\\b", "\\bhelpline\\b", "\\bhelpdesk\\b",
+        "\\b\\d{3}[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b",
+        "@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+        "tel:", "mailto:",
+        "office hours", "business hours", "opening hours",
+        "mon(day)?\\s*[-–]\\s*(fri|sun)", "\\bam\\b.*\\bpm\\b"
+      ],
+      "severity_if_opaque": "critical",
+      "severity_if_js_only": "high"
+    },
+    "product_identity": {
+      "label": "Product / Service Identity",
+      "patterns": [
+        "\\bproduct\\b", "\\bfeatures?\\b",
+        "\\bspecifications?\\b", "\\bspecs?\\b",
+        "\\bmodel\\b", "\\bversion\\b", "\\bedition\\b",
+        "\\bdimensions?\\b", "\\bweight\\b",
+        "\\bcapacity\\b", "\\bwarranty\\b", "\\bguarantee\\b",
+        "\\bavailab(le|ility)\\b", "in stock", "out of stock",
+        "\\bsku\\b", "\\bpart number\\b", "\\bmpn\\b",
+        "\\bingredients?\\b", "\\bnutrition\\b",
+        "\\bcompatib(le|ility)\\b", "\\brequirements?\\b"
+      ],
+      "severity_if_opaque": "high",
+      "severity_if_js_only": "high"
+    },
+    "reviews_ratings": {
+      "label": "Reviews / Ratings",
+      "patterns": [
+        "\\breview\\b", "\\brating\\b", "\\bstars?\\b",
+        "\\btestimonial\\b", "customer says",
+        "out of 5", "out of 10",
+        "★", "☆", "⭐",
+        "verified purchase", "verified buyer",
+        "\\brecommend\\b", "\\bhelpful\\b",
+        "\\d+\\s+reviews?"
+      ],
+      "severity_if_opaque": "high",
+      "severity_if_js_only": "medium"
+    },
+    "faq": {
+      "label": "FAQ / Help Content",
+      "patterns": [
+        "\\bfaq\\b", "frequently asked",
+        "\\bq\\s*[&:]\\s*a\\b", "questions? and answers?",
+        "how (do|does|can|to)", "what (is|are)",
+        "\\btroubleshoot\\b", "\\bknowledge base\\b"
+      ],
+      "severity_if_opaque": "medium",
+      "severity_if_js_only": "medium"
+    },
+    "location": {
+      "label": "Location / Directions",
+      "patterns": [
+        "\\blocation\\b", "\\bdirections?\\b",
+        "\\bmap\\b", "\\bfind us\\b", "\\bvisit us\\b",
+        "\\bstore locator\\b", "\\bnearby\\b",
+        "\\bzip\\s*code\\b", "\\bpostal\\s*code\\b",
+        "\\blatitude\\b", "\\blongitude\\b"
+      ],
+      "severity_if_opaque": "high",
+      "severity_if_js_only": "medium"
+    }
+  }
+}
