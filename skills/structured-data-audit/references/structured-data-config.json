@@ -1,0 +1,134 @@
+{
+  "_description": "Shared configuration for structured-data-audit scripts. Single source of truth for tunable thresholds, required/recommended meta tags, schema expectations, and detection limits. All scripts load this file at startup.",
+  "_last_updated": "2026-09-03",
+
+  "extraction": {
+    "default_max_pages": 10,
+    "default_timeout_seconds": 15,
+    "max_json_ld_bytes": 1048576,
+    "user_agent": "BrandAIReadinessAudit/1.0 (+https://github.com/brand-ai-readiness-audit)"
+  },
+
+  "jsonld": {
+    "syntax_check_enabled": true,
+    "strict_schema_org_context": true,
+    "allowed_context_patterns": [
+      "https?://schema.org/?",
+      "https?://www.schema.org/?"
+    ],
+    "homepage_expected_types": [
+      "Organization",
+      "WebSite",
+      "LocalBusiness",
+      "Corporation"
+    ]
+  },
+
+  "opengraph": {
+    "required_tags": [
+      "og:title",
+      "og:description",
+      "og:image",
+      "og:url",
+      "og:type"
+    ],
+    "recommended_tags": [
+      "og:site_name",
+      "og:locale"
+    ],
+    "valid_types": [
+      "website",
+      "article",
+      "book",
+      "profile",
+      "music.song",
+      "music.album",
+      "video.movie",
+      "video.episode",
+      "video.other"
+    ],
+    "suppress_utility_patterns": [
+      "^/login",
+      "^/signin",
+      "^/signup",
+      "^/register",
+      "^/auth",
+      "^/logout",
+      "^/privacy",
+      "^/terms",
+      "^/tos",
+      "^/legal",
+      "^/cookie",
+      "^/search",
+      "^/cart",
+      "^/checkout",
+      "^/account",
+      "^/settings",
+      "^/admin",
+      "^/dashboard"
+    ]
+  },
+
+  "twitter": {
+    "required_tags": [
+      "twitter:card",
+      "twitter:title",
+      "twitter:description"
+    ],
+    "recommended_tags": [
+      "twitter:image",
+      "twitter:site",
+      "twitter:creator"
+    ],
+    "valid_card_types": [
+      "summary",
+      "summary_large_image",
+      "app",
+      "player"
+    ]
+  },
+
+  "meta": {
+    "title_min_length": 10,
+    "title_max_length": 65,
+    "description_min_length": 50,
+    "description_max_length": 165,
+    "generic_title_patterns": [
+      "^home$",
+      "^welcome$",
+      "^untitled$",
+      "^index$",
+      "^default$",
+      "^page \\d+$",
+      "^new page$"
+    ],
+    "favicon_rel_types": [
+      "icon",
+      "shortcut icon",
+      "apple-touch-icon",
+      "apple-touch-icon-precomposed"
+    ]
+  },
+
+  "llms_txt": {
+    "root_paths": [
+      "/llms.txt",
+      "/llms-full.txt",
+      "/.well-known/llms.txt"
+    ],
+    "min_content_length": 100,
+    "max_content_length": 524288,
+    "recommended_sections": [
+      "# ",
+      "> ",
+      "## "
+    ]
+  },
+
+  "content_cross_reference": {
+    "min_similarity_ratio": 0.5,
+    "check_title_match": true,
+    "check_h1_match": true,
+    "check_description_match": true
+  }
+}

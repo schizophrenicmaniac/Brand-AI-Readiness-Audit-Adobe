@@ -1,0 +1,149 @@
+{
+  "_description": "Registry of Schema.org types evaluated during structured-data-audit. Defines required and recommended properties, applicable page contexts, and citation-readiness impact for AI agents.",
+  "_last_updated": "2026-09-03",
+
+  "types": {
+    "Organization": {
+      "category": "entity_identity",
+      "applicable_pages": ["homepage", "about", "contact"],
+      "required_properties": ["name", "url"],
+      "recommended_properties": ["logo", "description", "sameAs", "contactPoint", "address"],
+      "ai_impact": "Grounds brand name, canonical homepage URL, brand logo, and authoritative cross-platform profiles (sameAs) for AI citation.",
+      "missing_on_homepage_severity": "high"
+    },
+    "WebSite": {
+      "category": "entity_identity",
+      "applicable_pages": ["homepage"],
+      "required_properties": ["name", "url"],
+      "recommended_properties": ["potentialAction", "description", "publisher"],
+      "ai_impact": "Enables search engine site links and Sitelinks Search Box; disambiguates site scope.",
+      "missing_on_homepage_severity": "medium"
+    },
+    "LocalBusiness": {
+      "category": "local_entity",
+      "applicable_pages": ["homepage", "contact", "locations"],
+      "required_properties": ["name", "address"],
+      "recommended_properties": ["telephone", "openingHoursSpecification", "geo", "url", "image", "priceRange"],
+      "ai_impact": "Essential for localized AI queries ('find nearby...', 'is X open today?'); grounds physical presence and NAP.",
+      "missing_on_homepage_severity": "high"
+    },
+    "Product": {
+      "category": "commercial",
+      "applicable_pages": ["product", "item", "shop", "ecommerce"],
+      "required_properties": ["name", "offers"],
+      "recommended_properties": ["image", "description", "sku", "brand", "aggregateRating", "review", "mpn"],
+      "ai_impact": "Directly fuels AI purchase recommendations, price comparisons, and feature lookups. Without Offer, price is invisible.",
+      "missing_on_homepage_severity": "low"
+    },
+    "Offer": {
+      "category": "commercial",
+      "applicable_pages": ["product", "pricing", "service"],
+      "required_properties": ["price", "priceCurrency"],
+      "recommended_properties": ["availability", "url", "priceValidUntil", "seller", "itemCondition"],
+      "ai_impact": "Supplies exact cost and currency directly to AI assistants; prevents hallucinated or stale pricing answers.",
+      "missing_on_homepage_severity": "low"
+    },
+    "Article": {
+      "category": "content",
+      "applicable_pages": ["blog", "article", "news", "post"],
+      "required_properties": ["headline", "datePublished", "author"],
+      "recommended_properties": ["image", "dateModified", "publisher", "description", "mainEntityOfPage"],
+      "ai_impact": "Provides publication chronology and authorship credentials; AI uses dateModified for freshness evaluation.",
+      "missing_on_homepage_severity": "low"
+    },
+    "BlogPosting": {
+      "category": "content",
+      "applicable_pages": ["blog", "post"],
+      "required_properties": ["headline", "datePublished", "author"],
+      "recommended_properties": ["image", "dateModified", "publisher", "description"],
+      "ai_impact": "Signals informal article publication date and authorship attribution.",
+      "missing_on_homepage_severity": "low"
+    },
+    "NewsArticle": {
+      "category": "content",
+      "applicable_pages": ["news", "press-release"],
+      "required_properties": ["headline", "datePublished", "author", "publisher"],
+      "recommended_properties": ["image", "dateModified", "dateline"],
+      "ai_impact": "Critical for real-time and current event synthesis by AI models.",
+      "missing_on_homepage_severity": "low"
+    },
+    "FAQPage": {
+      "category": "qa_knowledge",
+      "applicable_pages": ["faq", "help", "support", "product", "pricing"],
+      "required_properties": ["mainEntity"],
+      "recommended_properties": ["name", "description"],
+      "sub_item_checks": {
+        "mainEntity": {
+          "expected_type": "Question",
+          "required_properties": ["name", "acceptedAnswer"],
+          "answer_properties": ["text"]
+        }
+      },
+      "ai_impact": "Highest-leverage markup for direct question answering and zero-click extraction in AI assistants.",
+      "missing_on_homepage_severity": "low"
+    },
+    "BreadcrumbList": {
+      "category": "navigation",
+      "applicable_pages": ["interior_pages", "product", "article", "category"],
+      "required_properties": ["itemListElement"],
+      "recommended_properties": [],
+      "sub_item_checks": {
+        "itemListElement": {
+          "expected_type": "ListItem",
+          "required_properties": ["position", "name", "item"]
+        }
+      },
+      "ai_impact": "Communicates hierarchical parent-child context and site taxonomy to crawler graphs.",
+      "missing_on_homepage_severity": "low"
+    },
+    "SoftwareApplication": {
+      "category": "commercial",
+      "applicable_pages": ["homepage", "product", "app", "download"],
+      "required_properties": ["name"],
+      "recommended_properties": ["operatingSystem", "applicationCategory", "offers", "description", "aggregateRating"],
+      "ai_impact": "Clarifies platform compatibility (macOS, Windows, iOS, Web) and pricing for technical software solutions.",
+      "missing_on_homepage_severity": "low"
+    },
+    "Service": {
+      "category": "commercial",
+      "applicable_pages": ["services", "pricing"],
+      "required_properties": ["name", "provider"],
+      "recommended_properties": ["description", "areaServed", "offers", "serviceType"],
+      "ai_impact": "Labels capability offerings, target geography, and providing legal entity.",
+      "missing_on_homepage_severity": "low"
+    }
+  },
+
+  "anti_patterns": [
+    {
+      "pattern_id": "AP-01",
+      "name": "Missing @context",
+      "description": "JSON-LD object lacks '@context': 'https://schema.org'.",
+      "severity": "high"
+    },
+    {
+      "pattern_id": "AP-02",
+      "name": "Missing @type",
+      "description": "JSON-LD object lacks '@type'.",
+      "severity": "high"
+    },
+    {
+      "pattern_id": "AP-03",
+      "name": "Invalid nesting or unquoted JSON",
+      "description": "JSON-LD block cannot be parsed by standard JSON decoders.",
+      "severity": "critical"
+    },
+    {
+      "pattern_id": "AP-04",
+      "name": "Placeholders or dummy content",
+      "description": "Schema properties contain placeholders such as 'Lorem ipsum', 'example.com', 'Acme', or 'TODO'.",
+      "severity": "high"
+    },
+    {
+      "pattern_id": "AP-05",
+      "name": "Content mismatch with visible DOM",
+      "description": "Values declared in schema (e.g. price, product name) contradict visible content on the rendered page.",
+      "severity": "high"
+    }
+  ]
+}
