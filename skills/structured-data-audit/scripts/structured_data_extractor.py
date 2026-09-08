@@ -40,15 +40,16 @@ _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
 
 
 def _load_json(filename: str) -> dict:
-    path = os.path.join(_REFS_DIR, filename)
+    path = os.path.normpath(os.path.join(_REFS_DIR, filename))
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        return {}
+        print(json.dumps({"error": f"Reference file not found: {path}. Ensure references/ is present."}), file=sys.stderr)
+        sys.exit(1)
     except json.JSONDecodeError as e:
         print(json.dumps({"error": f"Invalid JSON in {path}: {e}"}), file=sys.stderr)
-        return {}
+        sys.exit(1)
 
 
 _CONFIG = _load_json("structured-data-config.json")

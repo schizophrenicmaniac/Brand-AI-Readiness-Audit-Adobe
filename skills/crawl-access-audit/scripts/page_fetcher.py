@@ -33,7 +33,7 @@ from robots_analyzer import parse_robots_txt, evaluate_bot
 try:
     import requests
 except ImportError:
-    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}))
+    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}), file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -623,6 +623,7 @@ def main():
                         help="Comma-separated page URLs from sitemap_validator output for orphan comparison")
     parser.add_argument("--sitemap-page-urls-file", default=None,
                         help="JSON file containing sitemap_validator's page_urls array")
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
     page_paths = None
@@ -640,7 +641,12 @@ def main():
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             parser.error(f"cannot read --sitemap-page-urls-file: {exc}")
     result = analyze(args.url, page_paths, args.max_pages, args.max_depth, sitemap_page_urls)
-    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False, default=str)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_json)
+    else:
+        print(output_json)
 
 
 if __name__ == "__main__":

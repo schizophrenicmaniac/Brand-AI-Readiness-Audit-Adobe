@@ -30,7 +30,7 @@ from robots_analyzer import parse_robots_txt, evaluate_bot
 try:
     import requests
 except ImportError:
-    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}))
+    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}), file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -474,6 +474,7 @@ def main():
                         help="Comma-separated sitemap URLs (overrides auto-discovery)")
     parser.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE,
                         help=f"Number of URLs to sample-check for HTTP status (default: {DEFAULT_SAMPLE_SIZE})")
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
     sitemap_urls = None
@@ -481,7 +482,12 @@ def main():
         sitemap_urls = [u.strip() for u in args.sitemap_urls.split(",") if u.strip()]
 
     result = analyze(args.url, sitemap_urls, args.sample_size)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_json)
+    else:
+        print(output_json)
 
 
 if __name__ == "__main__":

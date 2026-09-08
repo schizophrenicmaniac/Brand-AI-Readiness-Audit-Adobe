@@ -33,7 +33,7 @@ except ImportError:
             "pip install playwright",
             "playwright install chromium"
         ]
-    }))
+    }), file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -560,6 +560,7 @@ def main():
                         help=f"Max pages to render (default: {DEFAULT_MAX_PAGES})")
     parser.add_argument("--raw-data", default=None,
                         help="Path to JSON output from html_fetcher.py (for diff computation)")
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
     page_paths = None
@@ -575,7 +576,12 @@ def main():
             print(json.dumps({"warning": f"Could not load raw data: {e}"}), file=sys.stderr)
 
     result = analyze(args.url, page_paths, args.max_pages, raw_data)
-    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False, default=str)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_json)
+    else:
+        print(output_json)
 
 
 if __name__ == "__main__":

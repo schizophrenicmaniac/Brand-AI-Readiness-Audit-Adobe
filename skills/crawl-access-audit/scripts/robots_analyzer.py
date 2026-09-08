@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urljoin
 try:
     import requests
 except ImportError:
-    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}))
+    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}), file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -315,6 +315,7 @@ def main():
         default=None,
         help="Comma-separated list of critical paths to check for blocking (default: common high-value paths)"
     )
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
     critical_paths = DEFAULT_CRITICAL_PATHS
@@ -322,7 +323,12 @@ def main():
         critical_paths = [p.strip() for p in args.critical_paths.split(",") if p.strip()]
 
     result = analyze(args.url, critical_paths)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_json)
+    else:
+        print(output_json)
 
 
 if __name__ == "__main__":

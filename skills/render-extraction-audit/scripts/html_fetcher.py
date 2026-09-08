@@ -27,7 +27,7 @@ from urllib.parse import urlparse, urljoin
 try:
     import requests
 except ImportError:
-    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}))
+    print(json.dumps({"error": "Missing dependency: requests. Install with: pip install requests"}), file=sys.stderr)
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -997,6 +997,7 @@ def main():
                         help="Comma-separated page paths to audit (e.g., /products,/pricing,/about)")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
                         help=f"Max pages to analyze (default: {DEFAULT_MAX_PAGES})")
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
     page_paths = None
@@ -1004,7 +1005,12 @@ def main():
         page_paths = [p.strip() for p in args.pages.split(",") if p.strip()]
 
     result = analyze(args.url, page_paths, args.max_pages)
-    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False, default=str)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_json)
+    else:
+        print(output_json)
 
 
 if __name__ == "__main__":

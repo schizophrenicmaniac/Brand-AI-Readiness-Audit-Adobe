@@ -1,0 +1,162 @@
+{
+  "_description": "Shared configuration for freshness-corroboration-audit scripts. Single source of truth for tunable thresholds, date detection patterns, staleness markers, external corroboration rubrics, disambiguation targets, and false-positive suppression rules. All scripts load this file at startup.",
+  "_last_updated": "2026-09-07",
+
+  "extraction": {
+    "default_max_pages": 10,
+    "default_timeout_seconds": 15,
+    "user_agent": "BrandAIReadinessAudit/1.0 (+https://github.com/brand-ai-readiness-audit)"
+  },
+
+  "date_detection": {
+    "stale_threshold_months": 12,
+    "critical_pricing_threshold_months": 24,
+    "http_headers": [
+      "last-modified",
+      "date"
+    ],
+    "meta_tags": [
+      "article:published_time",
+      "article:modified_time",
+      "og:updated_time",
+      "date",
+      "dcterms.date",
+      "dcterms.modified",
+      "dcterms.created",
+      "sailthru.date",
+      "parsely-pub-date",
+      "pubdate",
+      "last-modified"
+    ],
+    "schema_properties": [
+      "datePublished",
+      "dateModified",
+      "uploadDate",
+      "releaseDate"
+    ],
+    "visible_date_regexes": [
+      "\\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{1,2},\\s+\\d{4}\\b",
+      "\\b\\d{1,2}\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{4}\\b",
+      "\\b\\d{4}-\\d{2}-\\d{2}\\b",
+      "\\b(?:Updated|Modified|Published|Last updated|Reviewed on)[:\\s]+(?:January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{1,2},\\s+\\d{4}\\b"
+    ]
+  },
+
+  "staleness_signals": {
+    "outdated_pricing_keywords": [
+      "2020 pricing",
+      "2021 pricing",
+      "2022 pricing",
+      "2023 pricing",
+      "2024 pricing",
+      "pricing for 2020",
+      "pricing for 2021",
+      "pricing for 2022",
+      "pricing for 2023",
+      "pricing for 2024"
+    ],
+    "future_tense_past_years": [
+      "upcoming in 2020",
+      "upcoming in 2021",
+      "upcoming in 2022",
+      "upcoming in 2023",
+      "upcoming in 2024",
+      "coming in 2020",
+      "coming in 2021",
+      "coming in 2022",
+      "coming in 2023",
+      "coming in 2024",
+      "roadmap for 2020",
+      "roadmap for 2021",
+      "roadmap for 2022",
+      "roadmap for 2023",
+      "roadmap for 2024"
+    ],
+    "dead_link_check": {
+      "enabled": true,
+      "max_links_per_page": 20,
+      "timeout_seconds": 5
+    }
+  },
+
+  "corroboration": {
+    "target_claims_count": 5,
+    "claim_types": [
+      "founding_year",
+      "hq_location",
+      "flagship_products",
+      "pricing_tiers",
+      "leadership"
+    ],
+    "min_independent_sources": 1,
+    "authoritative_source_domains": [
+      "wikipedia.org",
+      "wikidata.org",
+      "bloomberg.com",
+      "forbes.com",
+      "reuters.com",
+      "crunchbase.com",
+      "linkedin.com",
+      "techcrunch.com",
+      "g2.com",
+      "capterra.com",
+      "trustradius.com"
+    ]
+  },
+
+  "disambiguation": {
+    "expected_sameas_domains": [
+      "wikipedia.org",
+      "wikidata.org",
+      "linkedin.com",
+      "crunchbase.com",
+      "x.com",
+      "twitter.com",
+      "youtube.com",
+      "github.com",
+      "facebook.com",
+      "instagram.com"
+    ],
+    "nap_required_for_types": [
+      "LocalBusiness",
+      "Store",
+      "Restaurant",
+      "MedicalBusiness",
+      "FinancialService",
+      "AutomotiveBusiness"
+    ],
+    "nap_fields": [
+      "name",
+      "telephone",
+      "address"
+    ]
+  },
+
+  "grounding_endpoints": {
+    "wikipedia_api": "https://en.wikipedia.org/w/api.php",
+    "wikidata_api": "https://www.wikidata.org/w/api.php",
+    "timeout_seconds": 8
+  },
+
+  "suppression": {
+    "evergreen_path_patterns": [
+      "^/about/?$",
+      "^/mission/?$",
+      "^/history/?$",
+      "^/values/?$",
+      "^/contact/?$",
+      "^/privacy-policy/?$",
+      "^/terms/?$",
+      "^/legal/?$"
+    ],
+    "skip_wikipedia_check_for_micro_businesses": true,
+    "utility_paths": [
+      "^/login",
+      "^/signin",
+      "^/signup",
+      "^/auth",
+      "^/cart",
+      "^/checkout"
+    ]
+  }
+}
