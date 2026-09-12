@@ -10,10 +10,6 @@ description: >
   title and meta description quality, llms.txt presence, and cross-references
   structured markup against visible DOM content.
 license: MIT
-tools:
-  - run_command
-  - read_url_content
-  - view_file
 ---
 
 # Structured-Data Audit
@@ -136,21 +132,34 @@ and return the findings list to the audit orchestrator.
 
 ---
 
-## Output Schema (per finding)
+## Output (shared finding contract)
+
+Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
+`README.md`). `scripts/schema_validator.py` emits contract findings directly; the orchestrator
+merges, dedupes, and schema-validates them. Content checks run only on successfully-fetched
+HTML pages (a failed or non-HTML fetch never becomes a "missing X" finding).
 
 ```json
 {
-  "finding_id": "sd-001",
-  "skill": "structured-data-audit",
+  "id": "sd-4f21ab",
+  "title": "Missing Organization or WebSite schema on homepage",
   "severity": "high",
-  "title": "No Organization schema on homepage",
-  "detail": "The homepage has no JSON-LD Organization or WebSite schema. AI assistants cannot reliably extract the company name, logo, or official social profiles.",
-  "affected_urls": ["/"],
-  "recommendation": "Add a JSON-LD block with @type Organization including name, url, logo, and sameAs properties."
+  "skill": "structured-data-audit",
+  "evidence": {
+    "url": "https://example.com/",
+    "source": "html",
+    "locator": "script[type=application/ld+json] @type",
+    "observed": "The homepage lacks Organization, WebSite, or LocalBusiness JSON-LD schema.",
+    "expected": "Organization | WebSite | LocalBusiness"
+  },
+  "suggested_action": {
+    "summary": "Add a JSON-LD block with @type Organization or WebSite including name, url, logo, and sameAs.",
+    "priority": "P1"
+  }
 }
 ```
 
-**Required fields per finding:** `finding_id`, `skill`, `severity`, `title`, `detail`, `affected_urls`, `recommendation`.
+**Required per finding:** `id`, `title`, `severity`, `evidence{url, source, observed}`, `suggested_action{summary, priority}`.
 
 ---
 

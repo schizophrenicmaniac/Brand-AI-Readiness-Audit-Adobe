@@ -65,19 +65,34 @@ retention of its own gives returning visitors nothing to latch onto.
 
 ---
 
-## Output Schema (per finding)
+## Output (shared finding contract)
+
+Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
+`README.md`). The executable compiler `scripts/engagement_analyzer.py` runs the core checks
+(mobile viewport, `<h1>` orientation, `<nav>` landmark, interior-page breadcrumbs, ambiguous
+CTA overload) over the fetched HTML and emits contract findings. Deeper checks (context
+retention, LCP, tap-target sizing, on-site search) are planned for a later pass.
 
 ```json
 {
-  "finding_id": "eg-001",
+  "id": "eg-2a77b0",
+  "title": "No visible breadcrumb on 4 interior page(s)",
+  "severity": "low",
   "skill": "engagement-audit",
-  "severity": "medium",
-  "title": "No breadcrumbs on product pages",
-  "detail": "Product detail pages at /products/* have no breadcrumb navigation. Visitors arriving from an AI citation land with no orientation to the site hierarchy.",
-  "affected_urls": ["/products/widget-pro", "/products/widget-lite"],
-  "recommendation": "Add BreadcrumbList markup and visible breadcrumb UI to all product pages."
+  "evidence": {
+    "url": "https://example.com/products/widget-pro",
+    "source": "html",
+    "locator": "nav.breadcrumb",
+    "observed": "interior pages without breadcrumb: /products/widget-pro, /products/widget-lite"
+  },
+  "suggested_action": {
+    "summary": "Add visible breadcrumb navigation on interior pages so visitors arriving mid-site from an AI citation can orient to the site hierarchy.",
+    "priority": "P3"
+  }
 }
 ```
+
+**Required per finding:** `id`, `title`, `severity`, `evidence{url, source, observed}`, `suggested_action{summary, priority}`.
 
 ---
 

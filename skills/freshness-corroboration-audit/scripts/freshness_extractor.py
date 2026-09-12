@@ -590,47 +590,34 @@ def analyze_page(url: str, session: requests.Session, check_dead_links: bool = T
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Extract freshness and corroboration data from a website.")
-    parser.add_argument("--url", required=True, help="Site root URL (e.g. https://example.com)")
-    parser.add_argument("--pages", default="", help="Comma-separated paths or URLs to audit")
-    parser.add_argument("--max-pages", type=int, default=_DEFAULT_MAX_PAGES, help="Max pages to inspect")
-    parser.add_argument("--skip-dead-links", action="store_true", help="Skip checking outbound link status for speed")
-    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
-    args = parser.parse_args()
-
-    base_url = args.url.strip()
+def build_raw(base_url: str, paths, session: requests.Session,
+              max_pages: int = _DEFAULT_MAX_PAGES, check_dead_links: bool = True) -> dict:
+    """Fetch + extract freshness/entity/grounding data for a page set, returning the raw
+    dict the freshness_validator consumes. Shared by main() and the orchestrator."""
+    base_url = base_url.strip()
     if not base_url.startswith(("http://", "https://")):
         base_url = "https://" + base_url
 
     urls_to_check = [base_url]
-    if args.pages:
-        for p in args.pages.split(","):
-            p = p.strip()
-            if not p:
-                continue
-            full = urljoin(base_url, p)
-            if full not in urls_to_check:
-                urls_to_check.append(full)
-
-    urls_to_check = urls_to_check[:args.max_pages]
-
-    session = requests.Session()
-    session.headers.update({"User-Agent": _USER_AGENT})
+    for p in (paths or []):
+        p = p.strip()
+        if not p:
+            continue
+        full = urljoin(base_url, p)
+        if full not in urls_to_check:
+            urls_to_check.append(full)
+    urls_to_check = urls_to_check[:max_pages]
 
     pages_output = []
     accumulated_same_as = []
     detected_brand_name = ""
     aggregated_claims = {
-        "founding_year": None,
-        "hq_location": None,
-        "leadership": [],
-        "flagship_products": [],
-        "pricing_sample": []
+        "founding_year": None, "hq_location": None, "leadership": [],
+        "flagship_products": [], "pricing_sample": [],
     }
 
     for u in urls_to_check:
-        page_res = analyze_page(u, session, check_dead_links=not args.skip_dead_links)
+        page_res = analyze_page(u, session, check_dead_links=check_dead_links)
         pages_output.append(page_res)
 
         ed = page_res.get("entity_data", {})
@@ -638,7 +625,6 @@ def main():
             detected_brand_name = ed["brand_name"]
         accumulated_same_as.extend(ed.get("sameAs", []))
 
-        # Aggregate claims across pages
         c = ed.get("claims", {})
         if c.get("founding_year") and not aggregated_claims["founding_year"]:
             aggregated_claims["founding_year"] = c["founding_year"]
@@ -655,14 +641,10 @@ def main():
                 aggregated_claims["pricing_sample"].append(price)
 
     accumulated_same_as = list(dict.fromkeys(accumulated_same_as))
-
-    # Grounding check on Wikipedia / Wikidata
     grounding = check_wikipedia_wikidata(detected_brand_name, accumulated_same_as, session)
-
-    # Generate search query templates for external corroboration
     corroboration_templates = generate_corroboration_templates(detected_brand_name, aggregated_claims)
 
-    final_report = {
+    return {
         "site": base_url,
         "audited_at": datetime.now(timezone.utc).isoformat(),
         "total_pages_audited": len(pages_output),
@@ -675,6 +657,23 @@ def main():
         "corroboration_templates": corroboration_templates,
         "pages": pages_output,
     }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract freshness and corroboration data from a website.")
+    parser.add_argument("--url", required=True, help="Site root URL (e.g. https://example.com)")
+    parser.add_argument("--pages", default="", help="Comma-separated paths or URLs to audit")
+    parser.add_argument("--max-pages", type=int, default=_DEFAULT_MAX_PAGES, help="Max pages to inspect")
+    parser.add_argument("--skip-dead-links", action="store_true", help="Skip checking outbound link status for speed")
+    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
+    args = parser.parse_args()
+
+    paths = [p for p in args.pages.split(",")] if args.pages else None
+    session = requests.Session()
+    session.headers.update({"User-Agent": _USER_AGENT})
+
+    final_report = build_raw(args.url, paths, session, args.max_pages,
+                             check_dead_links=not args.skip_dead_links)
 
     output_json = json.dumps(final_report, indent=2)
     if args.output:

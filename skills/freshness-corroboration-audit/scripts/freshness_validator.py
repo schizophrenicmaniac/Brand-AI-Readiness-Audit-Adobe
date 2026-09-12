@@ -27,6 +27,12 @@ from urllib.parse import urlparse
 # ---------------------------------------------------------------------------
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
+_LIB_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "..", "..", "lib"))
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+from report import make_finding  # noqa: E402
+
+SKILL = "freshness-corroboration-audit"
 
 
 def _load_json(filename: str) -> dict:
@@ -57,18 +63,33 @@ class FreshnessValidator:
         self.findings = []
         self._finding_counter = 1
 
-    def _add_finding(self, severity: str, title: str, detail: str, affected_urls: list, recommendation: str):
-        finding_id = f"fc-{self._finding_counter:03d}"
-        self._finding_counter += 1
-        self.findings.append({
-            "finding_id": finding_id,
-            "skill": "freshness-corroboration-audit",
-            "severity": severity,
-            "title": title,
-            "detail": detail,
-            "affected_urls": affected_urls,
-            "recommendation": recommendation,
-        })
+    def _add_finding(self, severity, title, detail, affected_urls, recommendation,
+                     *, check_id=None, source="html", locator="", expected=None):
+        """Append one contract-shaped finding. Keeps the original keyword interface;
+        `detail` becomes evidence.observed and `recommendation` the action summary."""
+        affected_urls = affected_urls or []
+        url = affected_urls[0] if affected_urls else (self.site_url or "")
+        observed = detail
+        if len(affected_urls) > 1:
+            shown = ", ".join(affected_urls[:6])
+            observed = f"{detail} (affected: {shown}{' …' if len(affected_urls) > 6 else ''})"
+        self.findings.append(make_finding(
+            skill=SKILL, check_id=check_id or title, severity=severity, title=title,
+            action_summary=recommendation, evidence_url=url, evidence_source=source,
+            evidence_observed=observed, evidence_locator=locator, evidence_expected=expected))
+
+    def _content_pages(self):
+        """Successfully-fetched HTML pages only — a failed fetch must not become a
+        'missing date' or 'missing identity' finding."""
+        out = []
+        for p in self.pages:
+            if p.get("status_code") != 200:
+                continue
+            ctype = (p.get("content_type") or "").lower()
+            if ctype and "html" not in ctype:
+                continue
+            out.append(p)
+        return out
 
     def _is_evergreen_path(self, url: str) -> bool:
         """Check if URL path is an evergreen document where old/missing dates should be suppressed."""
@@ -112,8 +133,9 @@ class FreshnessValidator:
         pages_with_fresh_dates = []
 
         missing_last_modified_header = []
+        content_pages = self._content_pages()
 
-        for page in self.pages:
+        for page in content_pages:
             url = page.get("url", "")
             if self._is_utility_path(url):
                 continue
@@ -217,7 +239,7 @@ class FreshnessValidator:
             )
 
         # Low finding: Missing Last-Modified HTTP header
-        if len(missing_last_modified_header) == len(self.pages) and self.pages:
+        if content_pages and len(missing_last_modified_header) == len(content_pages):
             self._add_finding(
                 severity="low",
                 title="Server does not emit Last-Modified HTTP header",
@@ -241,7 +263,7 @@ class FreshnessValidator:
 
     def validate_fc02_staleness(self):
         """FC-02: Content staleness signals check."""
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             if self._is_utility_path(url):
                 continue
@@ -351,7 +373,9 @@ class FreshnessValidator:
                     recommendation="Align company profiles across external directories, Wikipedia, and registries to eliminate conflicting signals.",
                 )
         else:
-            # If no manual corroboration file provided, analyze extracted claims and emit actionable verification finding
+            # No corroboration evidence supplied. sameAs coverage is reported by FC-04
+            # (do NOT double-report it here). Emit an informational note that external
+            # verification is still pending, with the generated queries as evidence.
             extracted_claim_types = []
             if claims.get("founding_year"):
                 extracted_claim_types.append(f"founding year ({claims['founding_year']})")
@@ -362,33 +386,19 @@ class FreshnessValidator:
             if claims.get("leadership"):
                 extracted_claim_types.append(f"leadership ({', '.join(claims['leadership'][:2])})")
 
-            # Check if entity has zero external profile links to corroborate
-            same_as = self.entity_data.get("sameAs_links", [])
-            if not same_as and extracted_claim_types:
+            if extracted_claim_types and self.corroboration_templates:
                 self._add_finding(
-                    severity="high",
-                    title="Core claims lack third-party verification anchors (zero sameAs links)",
-                    detail=(
-                        f"Entity declares {len(extracted_claim_types)} key claims ({', '.join(extracted_claim_types)}) "
-                        "but provides zero sameAs external profile links to enable automated AI cross-verification."
-                    ),
-                    affected_urls=[self.site_url],
-                    recommendation=(
-                        "Add sameAs links to JSON-LD Organization schema pointing to authoritative third-party profiles "
-                        "(LinkedIn, Crunchbase, Wikipedia, official registries)."
-                    ),
-                )
-            elif self.corroboration_templates:
-                # Informational guidance showing queries generated for corroboration
-                self._add_finding(
+                    check_id="FC-03-pending",
                     severity="info",
-                    title="Corroboration search query templates generated for agent verification",
+                    title="External corroboration of core claims not yet verified",
                     detail=(
-                        f"Generated {len(self.corroboration_templates)} external corroboration queries for {brand_name}. "
-                        "Run search_web tool against these queries to confirm multi-source consensus."
+                        f"Detected {len(extracted_claim_types)} core claim(s) ({', '.join(extracted_claim_types)}). "
+                        f"{len(self.corroboration_templates)} search queries were generated to confirm them against "
+                        "independent sources; supply --corroboration-data to record the results."
                     ),
                     affected_urls=[self.site_url],
-                    recommendation="Agent can execute provided search_web queries to verify founding date, HQ, and flagship offerings.",
+                    source="external",
+                    recommendation="Run the generated corroboration queries and confirm each claim appears consistently on at least one independent authoritative source.",
                 )
 
     def validate_fc04_disambiguation(self):
@@ -397,18 +407,21 @@ class FreshnessValidator:
         brand_name = self.entity_data.get("detected_brand_name", "")
         expected_domains = _CONFIG.get("disambiguation", {}).get("expected_sameas_domains", [])
 
-        # Check sameAs completeness
+        # Check sameAs completeness (single source of truth for the sameAs gap; FC-03
+        # no longer duplicates it).
         if not same_as:
             self._add_finding(
-                severity="high",
-                title="Missing sameAs schema links in Organization markup",
+                check_id="FC-04-sameas-missing",
+                severity="medium",
+                title="No sameAs disambiguation links in Organization schema",
                 detail=(
                     f"Brand '{brand_name}' does not declare any sameAs links in JSON-LD. "
                     "AI search engines cannot disambiguate the brand from identically named or similar entities."
                 ),
                 affected_urls=[self.site_url],
+                locator="Organization.sameAs",
                 recommendation=(
-                    "Add sameAs array to Organization schema linking to official profiles: "
+                    "Add a sameAs array to the Organization schema linking to official profiles: "
                     "Wikipedia, Wikidata, LinkedIn, Crunchbase, and verified social channels."
                 ),
             )
@@ -443,7 +456,7 @@ class FreshnessValidator:
                 )
 
         # NAP validation for local business types
-        for page in self.pages:
+        for page in self._content_pages():
             ed = page.get("entity_data", {})
             nap = ed.get("nap", {})
             if nap.get("name") and (nap.get("telephone") or nap.get("address")):
@@ -463,18 +476,11 @@ class FreshnessValidator:
                         recommendation="Provide complete postalAddress and telephone fields in LocalBusiness schema.",
                     )
 
-        # Brand name collision heuristic: Very short or common dictionary word brand
-        if brand_name and len(brand_name) <= 3 and not any("wikidata.org" in s or "wikipedia.org" in s for s in same_as):
-            self._add_finding(
-                severity="high",
-                title=f"High entity collision risk for short brand identifier ('{brand_name}')",
-                detail=(
-                    f"The brand identifier '{brand_name}' is 3 characters or fewer and lacks Wikipedia/Wikidata sameAs grounding. "
-                    "AI systems face severe ambiguity distinguishing this acronym from common abbreviations."
-                ),
-                affected_urls=[self.site_url],
-                recommendation="Establish a Wikidata item and link company Crunchbase and LinkedIn profiles to disambiguate the acronym.",
-            )
+        # NOTE: the old "brand name <= 3 chars => collision risk" heuristic was removed.
+        # Name length alone is not evidence of a real collision (many short names are
+        # unambiguous, e.g. IBM, HP), so it produced false positives. Disambiguation is
+        # covered by the sameAs / Wikidata grounding checks (FC-04 above, FC-05 below),
+        # which key off observed grounding links rather than a name-length proxy.
 
     def validate_fc05_wikipedia(self):
         """FC-05: Wikipedia / Wikidata presence check."""
@@ -524,36 +530,21 @@ class FreshnessValidator:
                 ),
             )
 
-    def run_all(self) -> dict:
-        """Execute all checks, prioritize findings, and format report."""
+    def run_all(self) -> list:
+        """Execute all checks, order by severity, and return contract findings."""
         self.validate_fc01_date_signals()
         self.validate_fc02_staleness()
-        self.validate_fc03_corroboration()
-        self.validate_fc04_disambiguation()
-        self.validate_fc05_wikipedia()
+        # Entity/corroboration/grounding checks need real content (or supplied
+        # corroboration data); skip them when nothing was successfully fetched so we
+        # don't emit "missing identity" findings for pages we never read.
+        if self._content_pages() or self.corroboration_data:
+            self.validate_fc03_corroboration()
+            self.validate_fc04_disambiguation()
+            self.validate_fc05_wikipedia()
 
-        # Sort findings by priority: critical -> high -> medium -> low -> info
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
         self.findings.sort(key=lambda x: priority_order.get(x.get("severity", "info"), 99))
-
-        # Re-number finding IDs sequentially in priority order (fc-001, fc-002, ...)
-        for idx, f in enumerate(self.findings, 1):
-            f["finding_id"] = f"fc-{idx:03d}"
-
-        # Severity summary
-        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-        for f in self.findings:
-            sev = f.get("severity", "info")
-            if sev in by_severity:
-                by_severity[sev] += 1
-
-        return {
-            "site": self.site_url,
-            "skill": "freshness-corroboration-audit",
-            "total_findings": len(self.findings),
-            "by_severity": by_severity,
-            "findings": self.findings,
-        }
+        return self.findings
 
 
 def main():
@@ -596,7 +587,13 @@ def main():
             print(json.dumps({"warning": f"Failed to load corroboration data: {e}"}), file=sys.stderr)
 
     validator = FreshnessValidator(raw_data, corroboration_data=corrob_data)
-    report = validator.run_all()
+    findings = validator.run_all()
+    report = {
+        "skill": SKILL,
+        "site": validator.site_url,
+        "total_findings": len(findings),
+        "findings": findings,
+    }
 
     output_str = json.dumps(report, indent=2)
     if args.output:

@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""test_audit.py — offline tests for the Brand AI Readiness Audit.
+
+No network: every check runs against crafted HTML/JSON fixtures, so it is deterministic and
+safe in restricted environments. Covers the finding/report contract, the SSRF guard, and each
+skill's finding compiler (including the false-positive fixes and status-gating).
+
+Run:  python test_audit.py   ->  prints "ALL TESTS PASSED" on success.
+"""
+
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SKILLS = os.path.join(_ROOT, "skills")
+for _p in [
+    os.path.join(_ROOT, "lib"),
+    os.path.join(_SKILLS, "crawl-access-audit", "scripts"),
+    os.path.join(_SKILLS, "render-extraction-audit", "scripts"),
+    os.path.join(_SKILLS, "structured-data-audit", "scripts"),
+    os.path.join(_SKILLS, "freshness-corroboration-audit", "scripts"),
+    os.path.join(_SKILLS, "engagement-audit", "scripts"),
+]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import report
+import safe_http
+import crawl_analyzer
+import render_analyzer
+import engagement_analyzer
+from schema_validator import SchemaValidator
+from freshness_validator import FreshnessValidator
+
+REQUIRED_FINDING_KEYS = {"id", "title", "severity", "evidence", "suggested_action"}
+
+
+def _assert_contract(findings, label):
+    for f in findings:
+        assert REQUIRED_FINDING_KEYS <= set(f), f"{label}: missing keys in {f}"
+        ev = f["evidence"]
+        assert {"url", "source", "observed"} <= set(ev), f"{label}: bad evidence {ev}"
+        act = f["suggested_action"]
+        assert act.get("summary") and act.get("priority") in ("P0", "P1", "P2", "P3"), \
+            f"{label}: bad suggested_action {act}"
+        assert f["severity"] in report.SEVERITIES, f"{label}: bad severity {f['severity']}"
+
+
+def test_report_contract():
+    f = report.make_finding(
+        "crawl-access-audit", "CA-01", "critical", "t", "fix it",
+        evidence_url="https://x/robots.txt", evidence_source="robots_txt",
+        evidence_observed="Disallow: /", evidence_locator="UA:OAI-SearchBot")
+    assert f["id"].startswith("ca-") and f["suggested_action"]["priority"] == "P0"
+    # stable id: same inputs -> same id
+    f2 = report.make_finding(
+        "crawl-access-audit", "CA-01", "critical", "t", "fix it",
+        evidence_url="https://x/robots.txt", evidence_source="robots_txt",
+        evidence_observed="Disallow: /", evidence_locator="UA:OAI-SearchBot")
+    assert f["id"] == f2["id"]
+
+    rep = report.assemble_report("x.com", [f], pages_audited=1)
+    report.validate_report(rep)
+    assert rep["summary"]["critical"] == 1 and rep["summary"]["total_findings"] == 1
+
+    # invalid inputs must raise
+    for bad in [
+        lambda: report.make_finding("x", "c", "SEV?", "t", "s", evidence_url="u",
+                                    evidence_source="html", evidence_observed="o"),
+        lambda: report.make_finding("x", "c", "high", "t", "s", evidence_url="u",
+                                    evidence_source="not_a_source", evidence_observed="o"),
+    ]:
+        try:
+            bad(); raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+    # a report missing summary must fail validation
+    broken = dict(rep); broken.pop("summary")
+    try:
+        report.validate_report(broken); raise AssertionError("expected schema failure")
+    except ValueError:
+        pass
+
+
+def test_ssrf_guard():
+    bad = ["http://127.0.0.1/", "http://[::1]/", "http://169.254.169.254/",
+           "http://10.1.2.3/", "http://192.168.0.5/", "http://user:pass@8.8.8.8/",
+           "ftp://8.8.8.8/", "http://8.8.8.8:22/", "http://0.0.0.0/"]
+    for u in bad:
+        try:
+            safe_http.validate_url(u)
+            raise AssertionError(f"SSRF guard allowed {u}")
+        except safe_http.UnsafeRequestError:
+            pass
+    for u in ["http://8.8.8.8/", "https://93.184.216.34/", "http://8.8.8.8:80/"]:
+        assert safe_http.validate_url(u) == u
+
+
+def test_crawl_analyzer():
+    robots = {"url": "https://example.com/robots.txt", "wildcard_disallow_all": True,
+              "ai_search_bots_blocked": [{"user_agent": "OAI-SearchBot"}],
+              "ai_training_bots_blocked": [], "critical_path_blocks": [],
+              "crawl_delay_issues": []}
+    sitemap = {"sitemaps_found": [], "errors": ["No sitemap found via robots.txt"],
+               "duplicates": {"duplicate_count": 0}, "parameter_proliferation": {"detected": False},
+               "declared_in_robots_txt": False, "page_urls": []}
+    pages = {"domain": "example.com", "tls": {"valid": True, "days_until_expiry": 200},
+             "http_to_https_redirect": {"redirects": True, "error": None},
+             "pages": [{"url": "https://example.com/", "status_code": 200, "ttfb_ms": 120,
+                        "redirect_chain_length": 0, "meta_robots": "noindex", "x_robots_tag": None,
+                        "canonical": {"href": None}, "challenge_page": {"detected": False},
+                        "hsts_header": "max-age=1", "is_soft_404": False}],
+             "crawl_graph": {}, "orphan_pages": {"checked": False}}
+    findings = crawl_analyzer.compile_findings(robots, sitemap, pages)
+    _assert_contract(findings, "crawl")
+    titles = " | ".join(f["title"] for f in findings)
+    assert any(f["severity"] == "critical" for f in findings), titles
+    assert "all crawlers" in titles.lower() or "search/retrieval" in titles.lower(), titles
+    assert any("noindex" in f["title"].lower() for f in findings), titles
+    assert any("sitemap" in f["title"].lower() for f in findings), titles
+
+
+def test_render_analyzer_static():
+    raw = {"pages": [{
+        "url": "https://example.com/", "status_code": 200, "error": None,
+        "spa_detection": {"is_shell": True, "noscript_quality": "missing",
+                          "frameworks": [{"framework": "React"}]},
+        "raw_text_length": 40,
+        "images": [{"is_decorative": False, "alt_quality": "missing", "src": "/a.png"},
+                   {"is_decorative": False, "alt_quality": "missing", "src": "/b.png"},
+                   {"is_decorative": False, "alt_quality": "missing", "src": "/c.png"}],
+        "canvases": [], "videos": [], "audios": [], "iframes": [], "pdf_links": [],
+        "infinite_scroll_markers": [], "icon_font_elements": [], "css_content_declarations": [],
+        "key_facts_in_raw_text": [], "text_ratio": {"full_text_length": 40},
+    }]}
+    findings = render_analyzer.compile_findings(raw, rendered=None)  # Playwright absent
+    _assert_contract(findings, "render")
+    titles = " | ".join(f["title"] for f in findings)
+    assert any("shell" in f["title"].lower() for f in findings), titles
+    assert any("image" in f["title"].lower() and f["severity"] == "high" for f in findings), titles
+
+
+def test_structured_validator_gating_and_contract():
+    raw = {"site": "https://example.com", "llms_txt": {"/llms.txt": {"present": False}},
+           "pages": [
+               {"url": "https://example.com/", "status_code": 200, "content_type": "text/html",
+                "json_ld": {"blocks": []}, "open_graph": {}, "twitter_card": {},
+                "meta": {"title": "Home", "description": "", "favicons": []},
+                "visible_cues": {"h1": [], "h2_sample": [], "detected_prices": [],
+                                 "detected_dates": [], "text_sample": ""}},
+               # failed fetch: must NOT produce findings
+               {"url": "https://example.com/broken", "status_code": 0, "error": "conn",
+                "json_ld": {"blocks": []}, "meta": {}, "visible_cues": {}}]}
+    findings = SchemaValidator(raw).run_all()
+    _assert_contract(findings, "structured")
+    assert any(f["severity"] == "critical" for f in findings)  # zero JSON-LD across site
+    # status-gating: no finding may reference the failed page
+    assert not any(f["evidence"]["url"].endswith("/broken") for f in findings)
+
+
+def test_freshness_fp_fixes():
+    raw = {"site": "https://example.com",
+           "entity": {"detected_brand_name": "IBM", "aggregated_claims": {"founding_year": "1911"},
+                      "sameAs_links": []},
+           "grounding": {"wikipedia": {"has_entry": False}, "wikidata": {"has_entry": False}},
+           "corroboration_templates": [{"claim_type": "founding_year"}],
+           "pages": [{"url": "https://example.com/", "status_code": 200, "content_type": "text/html",
+                      "date_signals": {"has_any_date_signal": False, "http_headers": {}},
+                      "staleness_markers": {}, "entity_data": {"nap": {}}}]}
+    findings = FreshnessValidator(raw).run_all()
+    _assert_contract(findings, "freshness")
+    titles = " | ".join(f["title"].lower() for f in findings)
+    # short-name collision heuristic removed (IBM is 3 chars) -> no collision finding
+    assert "collision" not in titles, titles
+    # missing sameAs reported exactly once, at medium (not high, not duplicated by FC-03)
+    sameas = [f for f in findings if "sameas" in f["title"].lower()]
+    assert len(sameas) == 1 and sameas[0]["severity"] == "medium", [f["title"] for f in findings]
+
+    # all-failed-fetch input -> no entity findings (content gating)
+    raw2 = dict(raw)
+    raw2["pages"] = [{"url": "https://example.com/", "status_code": 0, "error": "conn"}]
+    assert FreshnessValidator(raw2).run_all() == []
+
+
+def test_engagement_analyzer():
+    html = ("<html><head></head><body>"
+            "<a>Learn more</a><a>Read more</a><a>click here</a><a>more</a>"
+            "</body></html>")
+    pages = [{"url": "https://example.com/", "status_code": 200, "html": html}]
+    findings = engagement_analyzer.compile_findings(pages)
+    _assert_contract(findings, "engagement")
+    titles = " | ".join(f["title"].lower() for f in findings)
+    assert "viewport" in titles and "<h1>" in titles and "ambiguous" in titles, titles
+
+
+def test_combined_report_validates():
+    all_findings = []
+    all_findings += crawl_analyzer.compile_findings(
+        {"url": "https://example.com/robots.txt", "wildcard_disallow_all": True,
+         "ai_search_bots_blocked": [], "ai_training_bots_blocked": [],
+         "critical_path_blocks": [], "crawl_delay_issues": []}, {}, {})
+    all_findings += engagement_analyzer.compile_findings(
+        [{"url": "https://example.com/about", "status_code": 200,
+          "html": "<html><head></head><body><p>hi</p></body></html>"}])
+    rep = report.assemble_report("example.com", all_findings, coverage={"checks_run": ["x"]},
+                                 pages_audited=2, proactive_improvements=[{"title": "t"}])
+    report.validate_report(rep)
+    assert rep["summary"]["total_findings"] == len(report.dedupe_findings(all_findings))
+
+
+def main():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"  ok  {t.__name__}")
+    print("ALL TESTS PASSED")
+
+
+if __name__ == "__main__":
+    main()

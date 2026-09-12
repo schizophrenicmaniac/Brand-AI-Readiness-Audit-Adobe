@@ -11,10 +11,6 @@ description: >
   (boilerplate-heavy pages). Each finding includes evidence and severity escalated
   by key-fact classification (pricing, contact, product identity).
 license: MIT
-tools:
-  - run_command
-  - read_url_content
-  - view_file
 ---
 
 # Render-Extraction Audit
@@ -216,21 +212,33 @@ the findings list to the audit orchestrator.
 
 ---
 
-## Output Schema (per finding)
+## Output (shared finding contract)
+
+Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
+`README.md`). The deterministic compiler `scripts/render_analyzer.py` turns the raw static
+(and optional rendered-DOM) JSON into contract findings. When Playwright is not installed the
+compiler runs the static heuristics only and still emits valid findings.
 
 ```json
 {
-  "finding_id": "re-001",
+  "id": "re-8b1c04",
+  "title": "3 content image(s) lack usable text alternatives",
+  "severity": "high",
   "skill": "render-extraction-audit",
-  "severity": "critical",
-  "title": "Product pricing is embedded in an image with no alt text",
-  "detail": "The pricing table on /pricing is an <img> (pricing-table.png) with alt=\"\". A machine reader cannot extract any pricing data from this page. 3 product images on the page lack text alternatives.",
-  "affected_urls": ["/pricing"],
-  "recommendation": "Convert the pricing table from an image to HTML <table> markup. If an image must be used, provide comprehensive alt text describing all pricing tiers. Also add Product/Offer JSON-LD structured data for machine-readable pricing."
+  "evidence": {
+    "url": "https://example.com/pricing",
+    "source": "html",
+    "locator": "img[alt]",
+    "observed": "alt missing/generic on: /img/pricing-table.png, /img/tiers.png"
+  },
+  "suggested_action": {
+    "summary": "Add descriptive alt text (or an HTML text equivalent); if the image carries facts like a pricing table, also provide those facts as HTML.",
+    "priority": "P1"
+  }
 }
 ```
 
-**Required fields per finding:** `finding_id`, `skill`, `severity`, `title`, `detail`, `affected_urls`, `recommendation`.
+**Required per finding:** `id`, `title`, `severity`, `evidence{url, source, observed}`, `suggested_action{summary, priority}`.
 
 ---
 

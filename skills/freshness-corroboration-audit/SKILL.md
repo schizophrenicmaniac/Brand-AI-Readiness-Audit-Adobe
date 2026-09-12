@@ -9,11 +9,6 @@ description: >
   multi-source corroboration of core claims, entity disambiguation (sameAs links,
   NAP consistency, brand collisions), and Wikipedia/Wikidata grounding anchors.
 license: MIT
-tools:
-  - run_command
-  - read_url_content
-  - search_web
-  - view_file
 ---
 
 # Freshness & Corroboration Audit
@@ -116,21 +111,33 @@ and return the findings list to the audit orchestrator.
 
 ---
 
-## Output Schema (per finding)
+## Output (shared finding contract)
+
+Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
+`README.md`). `scripts/freshness_validator.py` emits contract findings directly. Entity /
+corroboration / grounding checks run only when content was successfully fetched (or external
+corroboration data is supplied), so a failed fetch never becomes a "missing identity" finding.
 
 ```json
 {
-  "finding_id": "fc-001",
-  "skill": "freshness-corroboration-audit",
-  "severity": "critical",
+  "id": "fc-9c33de",
   "title": "Commercial pricing page dates exceed 24 months staleness threshold",
-  "detail": "The /pricing page shows 'Starting at $29/mo' but has no published/modified date since 2023. AI assistants cannot confirm pricing accuracy.",
-  "affected_urls": ["/pricing"],
-  "recommendation": "Add dateModified in JSON-LD and include a visible 'Last updated' stamp to confirm pricing is current."
+  "severity": "critical",
+  "skill": "freshness-corroboration-audit",
+  "evidence": {
+    "url": "https://example.com/pricing",
+    "source": "html",
+    "locator": "freshest_date",
+    "observed": "https://example.com/pricing (2023-01-10, ~30 mos ago)"
+  },
+  "suggested_action": {
+    "summary": "Update the visible 'last updated' text and add dateModified schema with a current timestamp to confirm pricing accuracy.",
+    "priority": "P0"
+  }
 }
 ```
 
-**Required fields per finding:** `finding_id`, `skill`, `severity`, `title`, `detail`, `affected_urls`, `recommendation`.
+**Required per finding:** `id`, `title`, `severity`, `evidence{url, source, observed}`, `suggested_action{summary, priority}`.
 
 ---
 

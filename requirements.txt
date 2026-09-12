@@ -1,0 +1,9 @@
+# Brand AI Readiness Audit — runtime dependencies
+requests>=2.31
+beautifulsoup4>=4.12
+jsonschema>=4.20
+
+# Optional: enables render-extraction's headless-browser JS-gap evidence.
+# Without it, render-extraction degrades to static heuristics (still valid findings).
+#   pip install playwright && playwright install chromium
+# playwright>=1.40

@@ -11,10 +11,6 @@ description: >
   "step 1 gate" from Appendix A — if the crawler cannot
   get in, nothing downstream matters for that page.
 license: MIT
-tools:
-  - run_command
-  - read_url_content
-  - view_file
 ---
 
 # Crawl-Access Audit
@@ -161,21 +157,33 @@ the findings list to the audit orchestrator.
 
 ---
 
-## Output Schema (per finding)
+## Output (shared finding contract)
+
+Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
+`README.md`). The deterministic compiler `scripts/crawl_analyzer.py` turns the
+robots/sitemap/page JSON above into contract findings; the orchestrator merges, dedupes,
+and schema-validates them into the final report.
 
 ```json
 {
-  "finding_id": "ca-001",
-  "skill": "crawl-access-audit",
+  "id": "ca-3f9a2c",
+  "title": "AI search/retrieval crawlers blocked by robots.txt",
   "severity": "critical",
-  "title": "robots.txt blocks OAI-SearchBot on all paths",
-  "detail": "User-agent: OAI-SearchBot with Disallow: / prevents OpenAI's search crawler from indexing any page. This removes the brand from ChatGPT Search citations.",
-  "affected_urls": ["/robots.txt"],
-  "recommendation": "Remove the blanket Disallow for OAI-SearchBot, or add 'Allow: /' to permit search indexing while keeping GPTBot (training) blocked if desired."
+  "skill": "crawl-access-audit",
+  "evidence": {
+    "url": "https://example.com/robots.txt",
+    "source": "robots_txt",
+    "locator": "Disallow",
+    "observed": "Disallow rules match: OAI-SearchBot, PerplexityBot"
+  },
+  "suggested_action": {
+    "summary": "Allow search/retrieval crawlers to fetch public pages; keep training-bot policy separate if desired.",
+    "priority": "P0"
+  }
 }
 ```
 
-**Required fields per finding:** `finding_id`, `skill`, `severity`, `title`, `detail`, `affected_urls`, `recommendation`.
+**Required per finding:** `id`, `title`, `severity`, `evidence{url, source, observed}`, `suggested_action{summary, priority}`. The stable `id` is derived from the check + evidence locator + URL (it does not shift when other findings are added).
 
 ---
 

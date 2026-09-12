@@ -24,6 +24,12 @@ from urllib.parse import urlparse
 # ---------------------------------------------------------------------------
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
+_LIB_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "..", "..", "lib"))
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+from report import make_finding  # noqa: E402
+
+SKILL = "structured-data-audit"
 
 
 def _load_json(filename: str) -> dict:
@@ -60,18 +66,33 @@ class SchemaValidator:
         self.findings = []
         self._finding_counter = 1
 
-    def _add_finding(self, severity: str, title: str, detail: str, affected_urls: list, recommendation: str):
-        finding_id = f"sd-{self._finding_counter:03d}"
-        self._finding_counter += 1
-        self.findings.append({
-            "finding_id": finding_id,
-            "skill": "structured-data-audit",
-            "severity": severity,
-            "title": title,
-            "detail": detail,
-            "affected_urls": affected_urls,
-            "recommendation": recommendation,
-        })
+    def _add_finding(self, severity, title, detail, affected_urls, recommendation,
+                     *, check_id=None, source="html", locator="", expected=None):
+        """Append one contract-shaped finding. Keeps the original keyword interface;
+        `detail` becomes evidence.observed and `recommendation` the action summary."""
+        affected_urls = affected_urls or []
+        url = affected_urls[0] if affected_urls else (self.site_url or "")
+        observed = detail
+        if len(affected_urls) > 1:
+            shown = ", ".join(affected_urls[:6])
+            observed = f"{detail} (affected: {shown}{' …' if len(affected_urls) > 6 else ''})"
+        self.findings.append(make_finding(
+            skill=SKILL, check_id=check_id or title, severity=severity, title=title,
+            action_summary=recommendation, evidence_url=url, evidence_source=source,
+            evidence_observed=observed, evidence_locator=locator, evidence_expected=expected))
+
+    def _content_pages(self):
+        """Only successfully-fetched HTML pages are eligible for content checks; a failed
+        or non-HTML fetch must not produce phantom 'missing X' findings."""
+        out = []
+        for p in self.pages:
+            if p.get("status_code") != 200:
+                continue
+            ctype = (p.get("content_type") or "").lower()
+            if ctype and "html" not in ctype:
+                continue
+            out.append(p)
+        return out
 
     def _is_homepage(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -155,33 +176,37 @@ class SchemaValidator:
 
     def validate_sd01_presence(self):
         """SD-01: JSON-LD Presence by Page Context."""
-        # Check domain-wide structured data presence across all audited pages
+        pages = self._content_pages()
         total_site_entities = 0
-        all_audited_urls = [p.get("url", "") for p in self.pages if p.get("url")]
+        all_audited_urls = [p.get("url", "") for p in pages if p.get("url")]
 
-        for p in self.pages:
+        for p in pages:
             for b in p.get("json_ld", {}).get("blocks", []):
                 if b.get("data"):
                     total_site_entities += len(self._flatten_entities(b["data"]))
 
         # Flag domain-wide critical absence if no structured data exists anywhere on site
-        if total_site_entities == 0 and self.pages:
+        if total_site_entities == 0 and pages:
             self._add_finding(
+                check_id="SD-01-zero",
                 severity="critical",
                 title="Zero JSON-LD structured data detected across website",
                 detail=(
-                    f"None of the {len(self.pages)} audited pages on {self.site_url} contain valid "
-                    "JSON-LD Schema.org markup. AI search engines, citation agents, and answer bots "
-                    "cannot extract structured brand identity, commercial offers, or content metadata."
+                    f"None of the {len(pages)} successfully-fetched pages on {self.site_url} contain "
+                    "valid JSON-LD Schema.org markup. AI search engines, citation agents, and answer "
+                    "bots cannot extract structured brand identity, commercial offers, or content metadata."
                 ),
                 affected_urls=all_audited_urls,
+                locator="script[type=application/ld+json]",
                 recommendation=(
                     "Implement baseline JSON-LD schema starting with Organization on the homepage, "
                     "and page-specific schema (Product, Article, FAQPage) across interior pages."
                 ),
             )
 
-        for page in self.pages:
+        missing_breadcrumb = []
+
+        for page in pages:
             url = page.get("url", "")
             json_ld_blocks = page.get("json_ld", {}).get("blocks", [])
             valid_blocks = [b for b in json_ld_blocks if b.get("data")]
@@ -209,6 +234,7 @@ class SchemaValidator:
                     # Promoted to critical if the site has zero structured data anywhere
                     sev = "critical" if total_site_entities == 0 else "high"
                     self._add_finding(
+                        check_id="SD-01-home-identity",
                         severity=sev,
                         title="Missing Organization or WebSite schema on homepage",
                         detail=(
@@ -216,6 +242,8 @@ class SchemaValidator:
                             "AI assistants cannot reliably ground entity identity, official links, or logo."
                         ),
                         affected_urls=[url],
+                        locator="script[type=application/ld+json] @type",
+                        expected="Organization | WebSite | LocalBusiness",
                         recommendation=(
                             "Add a JSON-LD block with @type Organization or WebSite, including name, url, logo, "
                             "and sameAs properties."
@@ -224,10 +252,12 @@ class SchemaValidator:
                 else:
                     matched = sorted([t for t in expected_home if t in type_names])
                     self._add_finding(
+                        check_id="SD-01-home-identity",
                         severity="info",
                         title="Valid Organization or WebSite schema detected on homepage",
                         detail=f"The homepage ({url}) declares valid identity schema ({', '.join(matched)}).",
                         affected_urls=[url],
+                        locator="script[type=application/ld+json] @type",
                         recommendation="Keep Organization schema up to date with official social channels and contact details.",
                     )
 
@@ -238,6 +268,7 @@ class SchemaValidator:
             if is_commercial_url or has_commerce_cues:
                 if not any(t in type_names for t in ["Product", "Offer", "SoftwareApplication", "Service"]):
                     self._add_finding(
+                        check_id="SD-01-product",
                         severity="high",
                         title="Missing Product or Offer schema on commercial page",
                         detail=(
@@ -245,6 +276,8 @@ class SchemaValidator:
                             "Product, Offer, SoftwareApplication, or Service structured markup."
                         ),
                         affected_urls=[url],
+                        locator="script[type=application/ld+json] @type",
+                        expected="Product | Offer | SoftwareApplication | Service",
                         recommendation="Add Product and Offer JSON-LD schema with name, price, priceCurrency, and availability properties.",
                     )
 
@@ -253,10 +286,12 @@ class SchemaValidator:
             if any(term in lower_url for term in editorial_terms):
                 if not any(t in type_names for t in ["Article", "BlogPosting", "NewsArticle"]):
                     self._add_finding(
+                        check_id="SD-01-article",
                         severity="medium",
                         title="Missing Article schema on editorial page",
                         detail=f"The page ({url}) appears to be an editorial article or post but has no Article, BlogPosting, or NewsArticle schema markup.",
                         affected_urls=[url],
+                        locator="script[type=application/ld+json] @type",
                         recommendation="Add Article or BlogPosting JSON-LD schema including headline, author, datePublished, and dateModified.",
                     )
 
@@ -267,9 +302,12 @@ class SchemaValidator:
                 re.search(r"\b(faq|frequently\s+asked|questions?\s*(&|and)?\s*answers?)\b", h, re.IGNORECASE)
                 for h in (visible.get("h1", []) + visible.get("h2_sample", []))
             )
+            # Require an explicit FAQ signal in the URL or a real FAQ heading — a page with
+            # two <details> elements alone is not enough to demand FAQPage markup.
             if is_faq_url or has_faq_heading:
                 if "FAQPage" not in type_names:
                     self._add_finding(
+                        check_id="SD-01-faq",
                         severity="medium",
                         title="Missing FAQPage schema on FAQ/support page",
                         detail=(
@@ -277,33 +315,34 @@ class SchemaValidator:
                             "AI assistants cannot directly ingest structured question-and-answer pairs for zero-click answer synthesis."
                         ),
                         affected_urls=[url],
+                        locator="script[type=application/ld+json] @type",
                         recommendation=(
                             "Add FAQPage JSON-LD schema with mainEntity array containing Question and acceptedAnswer entities."
                         ),
                     )
-                else:
-                    self._add_finding(
-                        severity="info",
-                        title="Rich FAQPage schema present",
-                        detail=f"The page ({url}) declares FAQPage structured data for AI question answering.",
-                        affected_urls=[url],
-                        recommendation="Ensure all visible Q&A pairs are synchronized with the FAQPage JSON-LD block.",
-                    )
 
-            # Breadcrumb check for interior pages
-            if not is_home:
-                if "BreadcrumbList" not in type_names:
-                    self._add_finding(
-                        severity="low",
-                        title="Missing BreadcrumbList schema on interior page",
-                        detail=f"Interior page ({url}) does not declare BreadcrumbList schema, missing an opportunity to convey site hierarchy to AI crawler graphs.",
-                        affected_urls=[url],
-                        recommendation="Include BreadcrumbList JSON-LD markup declaring parent-child site navigation structure.",
-                    )
+            # Breadcrumb: collect interior pages missing it; report once (not per page).
+            if not is_home and "BreadcrumbList" not in type_names:
+                missing_breadcrumb.append(url)
+
+        if missing_breadcrumb:
+            self._add_finding(
+                check_id="SD-01-breadcrumb",
+                severity="low",
+                title=f"BreadcrumbList schema missing on {len(missing_breadcrumb)} interior page(s)",
+                detail=(
+                    "Interior pages do not declare BreadcrumbList schema, missing an opportunity to "
+                    "convey site hierarchy to AI crawler graphs."
+                ),
+                affected_urls=missing_breadcrumb,
+                locator="script[type=application/ld+json] @type=BreadcrumbList",
+                recommendation="Include BreadcrumbList JSON-LD markup declaring parent-child navigation on interior pages.",
+            )
+
 
     def validate_sd02_validity(self):
         """SD-02: JSON-LD Syntactic & Semantic Validity."""
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             json_ld_blocks = page.get("json_ld", {}).get("blocks", [])
 
@@ -426,7 +465,7 @@ class SchemaValidator:
     def validate_sd03_opengraph(self):
         """SD-03: Open Graph Protocol Tags."""
         req_og = _CONFIG.get("opengraph", {}).get("required_tags", ["og:title", "og:description", "og:image", "og:url", "og:type"])
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             is_utility = self._is_utility_page(url)
             og = page.get("open_graph", {})
@@ -468,7 +507,7 @@ class SchemaValidator:
     def validate_sd04_twitter(self):
         """SD-04: Twitter / X Card Tags."""
         req_tw = _CONFIG.get("twitter", {}).get("required_tags", ["twitter:card", "twitter:title", "twitter:description"])
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             if self._is_utility_page(url):
                 continue
@@ -492,7 +531,7 @@ class SchemaValidator:
         d_max = _CONFIG.get("meta", {}).get("description_max_length", 165)
         generic_patterns = [re.compile(p, re.IGNORECASE) for p in _CONFIG.get("meta", {}).get("generic_title_patterns", [])]
 
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             meta = page.get("meta", {})
             title = meta.get("title", "").strip()
@@ -560,13 +599,15 @@ class SchemaValidator:
                     recommendation=f"Keep meta descriptions under {d_max} characters to avoid truncation.",
                 )
 
-            # Favicon
-            if not favicons:
+            # Favicon — a site-wide asset; flag once, on the homepage, not per page.
+            if not favicons and self._is_homepage(url):
                 self._add_finding(
+                    check_id="SD-05-favicon",
                     severity="low",
                     title="Missing favicon link declaration",
-                    detail=f"The page ({url}) does not declare a <link rel=\"icon\"> or apple-touch-icon tag.",
+                    detail=f"The homepage ({url}) does not declare a <link rel=\"icon\"> or apple-touch-icon tag.",
                     affected_urls=[url],
+                    locator='link[rel=icon]',
                     recommendation="Add <link rel=\"icon\" href=\"/favicon.ico\"> to the <head>.",
                 )
 
@@ -575,20 +616,24 @@ class SchemaValidator:
         root_llms = self.llms_txt_data.get("/llms.txt", {})
         if not root_llms.get("present"):
             self._add_finding(
+                check_id="SD-06-llms",
                 severity="low",
                 title="Missing /llms.txt machine-facing summary file",
-                detail=f"No /llms.txt file was found at {self.site_url}/llms.txt. Emerging AI web agents use llms.txt to quickly parse site purpose, structure, and documentation.",
+                detail=f"No /llms.txt file was found at {self.site_url}llms.txt. Emerging AI web agents use llms.txt to quickly parse site purpose, structure, and documentation.",
                 affected_urls=[f"{self.site_url.rstrip('/')}/llms.txt"],
+                source="llms_txt",
                 recommendation="Create an /llms.txt markdown file at the domain root with an H1 brand title, a blockquote summary, and links to core docs.",
             )
         else:
             length = root_llms.get("length_chars", 0)
             if length < 50:
                 self._add_finding(
+                    check_id="SD-06-llms-thin",
                     severity="low",
                     title="/llms.txt file is too brief or empty",
                     detail=f"An /llms.txt file was found at {self.site_url}/llms.txt, but it only contains {length} characters.",
                     affected_urls=[f"{self.site_url.rstrip('/')}/llms.txt"],
+                    source="llms_txt",
                     recommendation="Expand /llms.txt with a project summary, key product offerings, and curated links.",
                 )
 
@@ -597,7 +642,7 @@ class SchemaValidator:
         def _extract_numbers(val):
             return re.findall(r"\d+(?:\.\d{2})?", str(val).replace(",", ""))
 
-        for page in self.pages:
+        for page in self._content_pages():
             url = page.get("url", "")
             visible = page.get("visible_cues", {})
             h1s = visible.get("h1", [])
@@ -699,7 +744,7 @@ class SchemaValidator:
                                     recommendation="Synchronize Schema datePublished and dateModified with visible article timestamps.",
                                 )
 
-    def run_all(self) -> dict:
+    def run_all(self) -> list:
         self.validate_sd01_presence()
         self.validate_sd02_validity()
         self.validate_sd03_opengraph()
@@ -708,28 +753,10 @@ class SchemaValidator:
         self.validate_sd06_llms_txt()
         self.validate_cross_references()
 
-        # Sort findings by priority: critical -> high -> medium -> low -> info
+        # Order by severity; ids are content-derived (stable), so no renumbering.
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
         self.findings.sort(key=lambda x: priority_order.get(x.get("severity", "info"), 99))
-
-        # Re-number finding IDs sequentially in priority order (sd-001, sd-002, ...)
-        for idx, f in enumerate(self.findings, 1):
-            f["finding_id"] = f"sd-{idx:03d}"
-
-        # Severity summary
-        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-        for f in self.findings:
-            sev = f.get("severity", "info")
-            if sev in by_severity:
-                by_severity[sev] += 1
-
-        return {
-            "site": self.site_url,
-            "skill": "structured-data-audit",
-            "total_findings": len(self.findings),
-            "by_severity": by_severity,
-            "findings": self.findings,
-        }
+        return self.findings
 
 
 def main():
@@ -764,7 +791,13 @@ def main():
         sys.exit(1)
 
     validator = SchemaValidator(raw_data)
-    report = validator.run_all()
+    findings = validator.run_all()
+    report = {
+        "skill": SKILL,
+        "site": validator.site_url,
+        "total_findings": len(findings),
+        "findings": findings,
+    }
 
     output_str = json.dumps(report, indent=2)
     if args.output:

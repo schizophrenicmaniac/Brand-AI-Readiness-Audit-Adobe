@@ -305,6 +305,34 @@ def analyze_page(url: str, session: requests.Session) -> dict:
     }
 
 
+def build_raw(base_url: str, paths, session: requests.Session, max_pages: int = _DEFAULT_MAX_PAGES) -> dict:
+    """Fetch + extract structured data for a page set, returning the raw dict the
+    schema_validator consumes. Shared by main() and the orchestrator (which passes a
+    cached SafeSession so pages are fetched once across all skills)."""
+    base_url = base_url.strip()
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "https://" + base_url
+
+    urls_to_check = [base_url]
+    for p in (paths or []):
+        p = p.strip()
+        if not p:
+            continue
+        full = urljoin(base_url, p)
+        if full not in urls_to_check:
+            urls_to_check.append(full)
+    urls_to_check = urls_to_check[:max_pages]
+
+    pages_output = [analyze_page(u, session) for u in urls_to_check]
+    llms_txt_results = check_llms_txt(base_url, session)
+    return {
+        "site": base_url,
+        "total_pages_audited": len(pages_output),
+        "llms_txt": llms_txt_results,
+        "pages": pages_output,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract structured data from website pages.")
     parser.add_argument("--url", required=True, help="Site root URL (e.g. https://example.com)")
@@ -313,38 +341,11 @@ def main():
     parser.add_argument("--output", default="", help="Optional file path to write JSON output")
     args = parser.parse_args()
 
-    base_url = args.url.strip()
-    if not base_url.startswith(("http://", "https://")):
-        base_url = "https://" + base_url
-
-    urls_to_check = [base_url]
-    if args.pages:
-        for p in args.pages.split(","):
-            p = p.strip()
-            if not p:
-                continue
-            full = urljoin(base_url, p)
-            if full not in urls_to_check:
-                urls_to_check.append(full)
-
-    urls_to_check = urls_to_check[:args.max_pages]
-
+    paths = [p for p in args.pages.split(",")] if args.pages else None
     session = requests.Session()
     session.headers.update({"User-Agent": _USER_AGENT})
 
-    pages_output = []
-    for u in urls_to_check:
-        res = analyze_page(u, session)
-        pages_output.append(res)
-
-    llms_txt_results = check_llms_txt(base_url, session)
-
-    final_report = {
-        "site": base_url,
-        "total_pages_audited": len(pages_output),
-        "llms_txt": llms_txt_results,
-        "pages": pages_output,
-    }
+    final_report = build_raw(args.url, paths, session, args.max_pages)
 
     output_json = json.dumps(final_report, indent=2)
     if args.output:
