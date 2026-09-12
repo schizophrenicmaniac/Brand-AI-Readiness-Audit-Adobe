@@ -1,0 +1,190 @@
+{
+  "_description": "Shared configuration for engagement-audit scripts. Single source of truth for tunable thresholds, navigation selectors, orientation rules, performance red flags, mobile criteria, CTA classifications, search discovery, and context retention hooks. All scripts load this file at startup.",
+  "_last_updated": "2026-09-08",
+
+  "extraction": {
+    "default_max_pages": 10,
+    "default_timeout_seconds": 15,
+    "user_agent": "BrandAIReadinessAudit/1.0 (+https://github.com/brand-ai-readiness-audit)"
+  },
+
+  "navigation": {
+    "key_destinations": [
+      "about",
+      "company",
+      "who-we-are",
+      "pricing",
+      "plans",
+      "rates",
+      "contact",
+      "support",
+      "help",
+      "products",
+      "services",
+      "solutions",
+      "features",
+      "docs",
+      "documentation"
+    ],
+    "destination_categories": {
+      "about": ["about", "company", "who-we-are", "mission"],
+      "pricing": ["pricing", "plans", "rates"],
+      "products_services": ["products", "services", "solutions", "features", "catalog"],
+      "contact_support": ["contact", "support", "help", "docs", "documentation"]
+    },
+    "max_acceptable_click_depth": 2,
+    "nav_selectors": [
+      "nav",
+      "[role='navigation']",
+      ".nav",
+      ".navbar",
+      ".menu",
+      ".header-nav",
+      ".main-navigation"
+    ]
+  },
+
+  "orientation": {
+    "breadcrumb_selectors": [
+      ".breadcrumb",
+      ".breadcrumbs",
+      "[aria-label='breadcrumb']",
+      "[aria-label='Breadcrumb']",
+      "nav.breadcrumb",
+      "ol.breadcrumb",
+      "ul.breadcrumb"
+    ],
+    "breadcrumb_schema_types": [
+      "BreadcrumbList"
+    ],
+    "h1_min_length": 5,
+    "h1_max_length": 100,
+    "hero_value_prop_min_chars": 30
+  },
+
+  "performance_red_flags": {
+    "max_render_blocking_scripts": 3,
+    "max_external_stylesheets": 4,
+    "max_third_party_domains": 10,
+    "check_missing_image_dimensions": true,
+    "check_missing_lazy_loading": true
+  },
+
+  "mobile_readiness": {
+    "required_viewport_pattern": "width=device-width",
+    "forbidden_viewport_patterns": [
+      "user-scalable=no",
+      "user-scalable=0",
+      "maximum-scale=1.0",
+      "maximum-scale=1"
+    ]
+  },
+
+  "calls_to_action": {
+    "generic_cta_phrases": [
+      "learn more",
+      "click here",
+      "read more",
+      "more",
+      "submit",
+      "go",
+      "continue",
+      "view more"
+    ],
+    "actionable_cta_keywords": [
+      "start free trial",
+      "get started",
+      "request demo",
+      "buy now",
+      "subscribe",
+      "download",
+      "sign up",
+      "book a demo",
+      "book demo",
+      "get demo",
+      "schedule demo",
+      "try free",
+      "try for free",
+      "start trial",
+      "choose plan",
+      "select plan",
+      "join now",
+      "create account",
+      "contact sales",
+      "order now",
+      "purchase",
+      "add to cart"
+    ],
+    "max_competing_primary_ctas_per_page": 3,
+    "cta_selectors": [
+      "a.btn",
+      "a.button",
+      "a.cta",
+      "button",
+      "[role='button']",
+      "input[type='submit']",
+      "input[type='button']"
+    ]
+  },
+
+  "site_search": {
+    "search_input_selectors": [
+      "input[type='search']",
+      "input[name*='search']",
+      "input[name='q']",
+      "input[placeholder*='search']",
+      "form[action*='search']",
+      "[role='search']"
+    ],
+    "search_icon_classes": [
+      "fa-search",
+      "icon-search",
+      "search-icon",
+      "search-btn",
+      "header-search"
+    ]
+  },
+
+  "context_retention": {
+    "retention_feature_patterns": [
+      "recently-viewed",
+      "recently_viewed",
+      "recent-items",
+      "browsing-history",
+      "reading-history",
+      "wishlist",
+      "saved",
+      "favorites",
+      "saved-items",
+      "recommended-for-you",
+      "for-you",
+      "continue-reading",
+      "my-account",
+      "profile",
+      "dashboard"
+    ],
+    "storage_indicators": [
+      "localstorage",
+      "sessionstorage",
+      "indexeddb"
+    ]
+  },
+
+  "suppression": {
+    "utility_page_patterns": [
+      "^/login",
+      "^/signin",
+      "^/signup",
+      "^/register",
+      "^/auth",
+      "^/logout",
+      "^/privacy",
+      "^/terms",
+      "^/tos",
+      "^/legal",
+      "^/cookie",
+      "^/cart",
+      "^/checkout"
+    ]
+  }
+}
