@@ -641,6 +641,16 @@ class SchemaValidator:
                     source="llms_txt",
                     recommendation="Expand /llms.txt with a project summary, key product offerings, and curated links.",
                 )
+            else:
+                self._add_finding(
+                    check_id="SD-06-llms-valid",
+                    severity="info",
+                    title="Valid /llms.txt machine-facing summary detected",
+                    detail=f"Valid /llms.txt found at {root_llms.get('url', self.site_url.rstrip('/') + '/llms.txt')} ({length} characters). Provides structured context for AI agents.",
+                    affected_urls=[root_llms.get("url", f"{self.site_url.rstrip('/')}/llms.txt")],
+                    source="llms_txt",
+                    recommendation="Keep /llms.txt updated with current brand, product, and canonical doc references.",
+                )
 
     def validate_cross_references(self):
         """SD-07: Cross-reference structured data properties against visible page content."""

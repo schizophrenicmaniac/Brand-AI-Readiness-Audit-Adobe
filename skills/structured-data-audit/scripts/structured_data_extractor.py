@@ -240,19 +240,31 @@ def check_llms_txt(base_url: str, session: requests.Session) -> dict:
             resp = session.get(full_url, timeout=8, allow_redirects=True)
             if resp.status_code == 200:
                 content_type = resp.headers.get("Content-Type", "").lower()
-                is_text = "text/plain" in content_type or "text/markdown" in content_type or "text/" in content_type
                 body = resp.text
-                results[path] = {
-                    "present": True,
-                    "url": full_url,
-                    "status_code": resp.status_code,
-                    "content_type": content_type,
-                    "length_chars": len(body),
-                    "has_title": bool(re.search(r"^#\s+", body, re.MULTILINE)),
-                    "has_summary": bool(re.search(r"^>\s+", body, re.MULTILINE)),
-                    "has_sections": bool(re.search(r"^##\s+", body, re.MULTILINE)),
-                    "snippet": body[:300],
-                }
+                # Reject SPA fallback HTML shells masquerading as llms.txt
+                is_html = (
+                    "text/html" in content_type
+                    or body.strip().lower().startswith(("<!doctype", "<html", "<head", "<body"))
+                )
+                if not is_html:
+                    results[path] = {
+                        "present": True,
+                        "url": full_url,
+                        "status_code": resp.status_code,
+                        "content_type": content_type,
+                        "length_chars": len(body),
+                        "has_title": bool(re.search(r"^#\s+", body, re.MULTILINE)),
+                        "has_summary": bool(re.search(r"^>\s+", body, re.MULTILINE)),
+                        "has_sections": bool(re.search(r"^##\s+", body, re.MULTILINE)),
+                        "snippet": body[:300],
+                    }
+                else:
+                    results[path] = {
+                        "present": False,
+                        "url": full_url,
+                        "status_code": resp.status_code,
+                        "reason": "HTML response (SPA fallback, not markdown/plain text)",
+                    }
             else:
                 results[path] = {
                     "present": False,

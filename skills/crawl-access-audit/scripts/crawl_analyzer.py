@@ -290,7 +290,13 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
                 "Sitemap lists URLs that return errors",
                 "Remove or fix sitemap URLs that 4xx/5xx; dead sitemap entries waste crawl budget.",
                 site_root, "sitemap", "; ".join(bad_urls[:5]), locator="sitemap url sample")
-        if not sitemap.get("declared_in_robots_txt"):
+        if sitemap.get("declared_in_robots_txt"):
+            s_urls = [s.get("url") for s in smaps if s.get("url")]
+            add("CA-05-declared", "info", "XML sitemap declared in robots.txt",
+                "Maintain sitemap declarations in robots.txt as sitemap structure changes.",
+                robots_url or site_root, "robots_txt",
+                f"Sitemap declared in robots.txt: {', '.join(s_urls[:2]) if s_urls else 'verified'}", locator="Sitemap")
+        else:
             add("CA-05-notdeclared", "low", "Sitemap not declared in robots.txt",
                 "Add a `Sitemap:` line to robots.txt to speed up sitemap discovery.",
                 robots_url or site_root, "robots_txt", "no Sitemap: directive", locator="Sitemap")

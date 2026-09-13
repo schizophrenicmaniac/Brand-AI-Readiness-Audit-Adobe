@@ -190,6 +190,12 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
     except Exception as e:
         coverage["errors"].append(f"sitemap: {str(e)[:200]}")
 
+    coverage["discovery_resources"] = {
+        "robots_txt": robots.get("url") if robots.get("status") == 200 else None,
+        "sitemaps": [s.get("url") for s in (sitemap or {}).get("sitemaps_found", []) if s.get("url")],
+        "llms_txt": None,
+    }
+
     chosen, skipped_auth, skipped_robots = _choose_pages(
         home, (sitemap or {}).get("page_urls"), robots_groups, max_pages)
     coverage["pages_selected"] = chosen
@@ -243,6 +249,8 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
         session = requests.Session()
         session.headers.update({"User-Agent": UA})
         raw = structured_data_extractor.build_raw(home, interior, session, max_pages)
+        if raw.get("llms_txt", {}).get("/llms.txt", {}).get("present"):
+            coverage["discovery_resources"]["llms_txt"] = raw["llms_txt"]["/llms.txt"].get("url")
         return SchemaValidator(raw).run_all()
     findings += _run_skill("structured-data-audit", _structured, coverage)
 
@@ -271,11 +279,20 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
 
 def _proactive(findings):
     """Forward-looking opportunities beyond detected defects (not counted as findings)."""
-    return [
-        {"title": "Publish an llms.txt index for AI agents",
-         "summary": "Add /llms.txt summarizing the brand, key products, and canonical doc links "
-                    "so AI web agents can orient quickly.",
-         "priority": "P3"},
+    has_valid_llms = any(
+        "valid /llms.txt" in f.get("title", "").lower()
+        or "sd-06-llms-valid" in f.get("id", "")
+        for f in findings
+    )
+    items = []
+    if not has_valid_llms:
+        items.append({
+            "title": "Publish an llms.txt index for AI agents",
+            "summary": "Add /llms.txt summarizing the brand, key products, and canonical doc links "
+                       "so AI web agents can orient quickly.",
+            "priority": "P3",
+        })
+    items.extend([
         {"title": "Add FAQPage / HowTo schema where you have Q&A or step content",
          "summary": "Structured Q&A and step markup are directly consumable by AI answer engines "
                     "and increase citation odds.",
@@ -284,7 +301,8 @@ def _proactive(findings):
          "summary": "Maintain sameAs links and a Wikidata item so assistants disambiguate the brand "
                     "and trust its facts.",
          "priority": "P3"},
-    ]
+    ])
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +342,24 @@ def to_markdown(report):
         "",
     ]
     cov = report.get("coverage", {})
+    disc = cov.get("discovery_resources", {})
+    disc_items = []
+    if disc.get("robots_txt"):
+        disc_items.append("`robots.txt`")
+    if disc.get("sitemaps"):
+        disc_items.append(f"{len(disc['sitemaps'])} XML sitemap(s)")
+    if disc.get("llms_txt"):
+        disc_items.append("`llms.txt`")
+    disc_line = f"- **Discovery & Protocol Resources:** {', '.join(disc_items)}" if disc_items else ""
+
     lines += [
         "## Audit Scope & Coverage",
         "",
         f"- **Audited Pages:** {len(cov.get('pages_selected', []))} pages analyzed",
+    ]
+    if disc_line:
+        lines.append(disc_line)
+    lines += [
         f"- **Detection Skills Executed:** {', '.join(cov.get('checks_run', [])) or 'None'}",
         f"- **Headless Browser Rendering:** {'Enabled (Playwright)' if cov.get('render_available') else 'Static Analysis Only'}",
     ]

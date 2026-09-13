@@ -341,17 +341,23 @@ def analyze(url: str, sitemap_urls: list = None, sample_size: int = DEFAULT_SAMP
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     robots_groups = None
+    robots_has_sitemap = bool(sitemap_urls)
     try:
         robots_response = requests.get(urljoin(base_url, "/robots.txt"), timeout=10,
                                         headers={"User-Agent": "BrandAIReadinessAudit/1.0"})
         if robots_response.status_code == 200:
             robots_groups = parse_robots_txt(robots_response.text)
+            if not robots_has_sitemap:
+                for line in robots_response.text.splitlines():
+                    if re.match(r"^sitemap\s*:\s*\S+", line.strip(), re.IGNORECASE):
+                        robots_has_sitemap = True
+                        break
     except requests.RequestException:
         pass
 
     result = {
         "sitemaps_found": [],
-        "declared_in_robots_txt": False,
+        "declared_in_robots_txt": robots_has_sitemap,
         "total_urls_across_sitemaps": 0,
         "duplicates": {"duplicate_count": 0, "duplicate_examples": []},
         "parameter_proliferation": {"detected": False},
@@ -365,18 +371,19 @@ def analyze(url: str, sitemap_urls: list = None, sample_size: int = DEFAULT_SAMP
         discovered = sitemap_urls
     else:
         discovered = discover_sitemaps(base_url)
-        # Check if any were from robots.txt
-        robots_url = urljoin(base_url, "/robots.txt")
-        try:
-            resp = requests.get(robots_url, timeout=10,
-                                headers={"User-Agent": "BrandAIReadinessAudit/1.0"})
-            if resp.status_code == 200:
-                for line in resp.text.splitlines():
-                    if re.match(r"^sitemap\s*:", line.strip(), re.IGNORECASE):
-                        result["declared_in_robots_txt"] = True
-                        break
-        except Exception:
-            pass
+        # Check if any were from robots.txt if not already verified
+        if not robots_has_sitemap:
+            robots_url = urljoin(base_url, "/robots.txt")
+            try:
+                resp = requests.get(robots_url, timeout=10,
+                                    headers={"User-Agent": "BrandAIReadinessAudit/1.0"})
+                if resp.status_code == 200:
+                    for line in resp.text.splitlines():
+                        if re.match(r"^sitemap\s*:\s*\S+", line.strip(), re.IGNORECASE):
+                            result["declared_in_robots_txt"] = True
+                            break
+            except Exception:
+                pass
 
     if not discovered:
         result["errors"].append("No sitemap found via robots.txt or standard paths (/sitemap.xml, /sitemap_index.xml)")

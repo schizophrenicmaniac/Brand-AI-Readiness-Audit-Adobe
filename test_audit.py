@@ -258,6 +258,27 @@ def test_fp_regressions():
         "https://x.com/", ["https://www.x.com/pricing", "https://www.x.com/about"], [], 8)
     assert len(chosen) >= 3, chosen
 
+    # (F) sitemap declared in robots: when sitemap is declared, no "Sitemap not declared" finding.
+    c_findings = crawl_analyzer.compile_findings(
+        {"url": "https://x.com/robots.txt"},
+        {"sitemaps_found": [{"url": "https://x.com/sitemap.xml", "status": 200, "xml_valid": True}],
+         "declared_in_robots_txt": True, "errors": []},
+        {"pages": []}
+    )
+    c_titles = " | ".join(f["title"] for f in c_findings)
+    assert "not declared in robots.txt" not in c_titles.lower()
+    assert any("declared in robots.txt" in f["title"].lower() and f["severity"] == "info" for f in c_findings)
+
+    # (G) llms.txt: when present and valid, emit an info finding and don't recommend publishing it in _proactive.
+    sd_raw = {"site": "https://x.com",
+              "llms_txt": {"/llms.txt": {"present": True, "url": "https://x.com/llms.txt", "length_chars": 150}},
+              "pages": [{"url": "https://x.com/", "status_code": 200, "json_ld": {"blocks": []}, "meta": {}, "visible_cues": {}}]}
+    sd_findings = SchemaValidator(sd_raw).run_all()
+    assert any("valid /llms.txt" in f["title"].lower() and f["severity"] == "info" for f in sd_findings)
+    assert not any("missing /llms.txt" in f["title"].lower() for f in sd_findings)
+    proactive = run_audit._proactive(sd_findings)
+    assert not any("publish an llms.txt" in p["title"].lower() for p in proactive)
+
 
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

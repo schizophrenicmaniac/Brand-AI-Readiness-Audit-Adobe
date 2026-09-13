@@ -26,6 +26,10 @@ from urllib.parse import urlparse
 # ---------------------------------------------------------------------------
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
+_LIB_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "..", "..", "lib"))
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+from report import make_finding  # noqa: E402
 
 
 def _load_json(filename: str) -> dict:
@@ -51,18 +55,20 @@ class EngagementValidator:
         self.findings = []
         self._finding_counter = 1
 
-    def _add_finding(self, severity: str, title: str, detail: str, affected_urls: list, recommendation: str):
-        finding_id = f"eg-{self._finding_counter:03d}"
+    def _add_finding(self, severity: str, title: str, detail: str, affected_urls: list, recommendation: str, check_id: str = "EG"):
+        url = affected_urls[0] if (affected_urls and affected_urls[0]) else (self.site_url or "https://example.com")
+        self.findings.append(make_finding(
+            skill="engagement-audit",
+            check_id=f"{check_id}-{self._finding_counter:03d}",
+            severity=severity,
+            title=title,
+            action_summary=recommendation,
+            evidence_url=url,
+            evidence_source="html",
+            evidence_observed=detail,
+            evidence_locator=""
+        ))
         self._finding_counter += 1
-        self.findings.append({
-            "finding_id": finding_id,
-            "skill": "engagement-audit",
-            "severity": severity,
-            "title": title,
-            "detail": detail,
-            "affected_urls": affected_urls,
-            "recommendation": recommendation,
-        })
 
     def _is_utility_path(self, url: str) -> bool:
         """Check if URL is a utility page where standard nav/CTA expectations should be suppressed."""

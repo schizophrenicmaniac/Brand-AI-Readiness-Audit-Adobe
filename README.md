@@ -1,11 +1,6 @@
 # Brand AI Readiness Audit
 
-[![Adobe University Hackathon 2026](https://img.shields.io/badge/Adobe%20University%20Hackathon-2026-FF0000?style=flat&logo=adobe&logoColor=white)](https://unstop.com/hackathons/crp-adobe-university-hackathon-2026-adobe-1715333)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
-[![Status](https://img.shields.io/badge/Status-Shippable%20%7C%20Verified-success?style=flat)](#verification--testing)
-[![Standard](https://img.shields.io/badge/Standard-agentskills.io%20v1.0-blueviolet?style=flat)](https://agentskills.io/)
-
-> **Submission for CRP - Adobe University Hackathon 2026**  
+> **Submission for Adobe University Hackathon 2026**  
 > **Team Name:** **Kasukabe Defence Group**  
 > **Team Members:**
 > * **Divyansh Yadav** (Team Leader)
@@ -14,7 +9,7 @@
 
 ---
 
-## Executive Overview
+## Overview
 
 The web is undergoing a structural shift from traditional search engines (ranked keyword links) to **autonomous AI agents and generative answer engines** (ChatGPT Search, Perplexity, Google AI Overviews, Claude). When an AI agent explores the web on behalf of a user, it evaluates websites through a fundamentally different lens than a human visitor.
 
@@ -204,7 +199,6 @@ Every generated finding adheres to the uniform schema:
 
 ## Hackathon Submission Details
 
-* **Hackathon:** [CRP - Adobe University Hackathon 2026 (Adobe)](https://unstop.com/hackathons/crp-adobe-university-hackathon-2026-adobe-1715333)
+* **Hackathon:** [Adobe University Hackathon 2026 (Adobe)](https://unstop.com/hackathons/crp-adobe-university-hackathon-2026-adobe-1715333)
 * **Team:** **Kasukabe Defence Group**
 * **Repository:** [Brand-AI-Readiness-Audit-Adobe](https://github.com/schizophrenicmaniac/Brand-AI-Readiness-Audit-Adobe)
-* **License:** Apache 2.0
