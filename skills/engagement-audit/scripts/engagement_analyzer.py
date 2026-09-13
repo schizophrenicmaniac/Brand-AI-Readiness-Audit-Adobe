@@ -94,7 +94,7 @@ def compile_findings(pages) -> list:
             generic_cta.append((url, len(cta_texts)))
 
     if missing_viewport:
-        add("EG-mobile-viewport", "high",
+        add("EG-mobile-viewport", "medium",
             f"No mobile viewport meta on {len(missing_viewport)} page(s)",
             "Add <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> so pages "
             "render correctly on phones — where most AI-referred visitors land.",

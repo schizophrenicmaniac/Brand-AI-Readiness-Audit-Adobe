@@ -25,7 +25,7 @@
     "max_sitemaps_to_process": 20,
     "max_urls_to_parse": 100000,
     "max_urls_per_file": 50000,
-    "default_sample_size": 20,
+    "default_sample_size": 6,
     "stale_lastmod_threshold_days": 365,
     "tracking_params": [
       "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",

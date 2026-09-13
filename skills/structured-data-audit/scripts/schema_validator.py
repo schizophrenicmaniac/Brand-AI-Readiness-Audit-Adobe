@@ -261,15 +261,20 @@ class SchemaValidator:
                         recommendation="Keep Organization schema up to date with official social channels and contact details.",
                     )
 
-            # Product / E-commerce checks
-            commercial_url_terms = ["/product", "/item", "/shop", "/pricing", "/store", "/services"]
+            # Product / E-commerce checks. NOTE: "/services" is deliberately NOT here —
+            # a consulting/services page is not e-commerce, and demanding Product/Offer
+            # schema on it (at HIGH) was a false positive. Commercial intent is confirmed
+            # by an explicit shop/pricing path OR real on-page commerce cues.
+            commercial_url_terms = ["/product", "/item", "/shop", "/pricing", "/store"]
             is_commercial_url = any(term in lower_url for term in commercial_url_terms)
             has_commerce_cues = bool(visible.get("detected_prices") and any(w in visible.get("text_sample", "").lower() for w in ["cart", "buy", "price", "checkout"]))
             if is_commercial_url or has_commerce_cues:
                 if not any(t in type_names for t in ["Product", "Offer", "SoftwareApplication", "Service"]):
+                    # HIGH only when the page shows real commerce cues (prices + cart/buy);
+                    # a bare /product(s) overview with no prices is a weaker signal -> medium.
                     self._add_finding(
                         check_id="SD-01-product",
-                        severity="high",
+                        severity="high" if has_commerce_cues else "medium",
                         title="Missing Product or Offer schema on commercial page",
                         detail=(
                             f"The page ({url}) appears to be a commercial product/pricing page but lacks "
@@ -619,7 +624,7 @@ class SchemaValidator:
                 check_id="SD-06-llms",
                 severity="low",
                 title="Missing /llms.txt machine-facing summary file",
-                detail=f"No /llms.txt file was found at {self.site_url}llms.txt. Emerging AI web agents use llms.txt to quickly parse site purpose, structure, and documentation.",
+                detail=f"No /llms.txt file was found at {self.site_url.rstrip('/')}/llms.txt. Emerging AI web agents use llms.txt to quickly parse site purpose, structure, and documentation.",
                 affected_urls=[f"{self.site_url.rstrip('/')}/llms.txt"],
                 source="llms_txt",
                 recommendation="Create an /llms.txt markdown file at the domain root with an H1 brand title, a blockquote summary, and links to core docs.",
@@ -656,13 +661,21 @@ class SchemaValidator:
             for b in json_ld_blocks:
                 all_entities.extend(self._flatten_entities(b["data"]))
 
-            # 1. Name / Headline vs. visible H1 / Title cross-reference (AP-05)
+            # 1. Name / Headline vs. visible H1 / Title cross-reference (AP-05).
+            # NOTE: Organization/WebSite are intentionally excluded — a brand `name`
+            # ("Acme Corporation") legitimately differs from a homepage <h1> tagline
+            # ("Ship software faster"), so comparing them produced HIGH false positives.
             for ent in all_entities:
                 t = ent.get("@type")
+                t_list = t if isinstance(t, list) else ([t] if t else [])
+                checked = {"Product", "Article", "SoftwareApplication", "Service"}
+                match_t = next((x for x in t_list if x in checked), None)
                 name = ent.get("name") or ent.get("headline")
-                if t in ("Product", "Organization", "Article", "SoftwareApplication", "Service") and isinstance(name, str) and (h1s or meta_title):
+                if match_t and isinstance(name, str) and (h1s or meta_title):
                     name_words = set(re.findall(r"\w+", name.lower()))
-                    target_text = " ".join(h1s).lower() if h1s else meta_title.lower()
+                    # Compare against BOTH the H1(s) and the <title>, so a name that matches
+                    # either surface is not flagged.
+                    target_text = (" ".join(h1s) + " " + (meta_title or "")).lower()
                     target_words = set(re.findall(r"\w+", target_text))
 
                     if len(name_words) > 1 and target_words:
@@ -671,13 +684,13 @@ class SchemaValidator:
                             display_target = h1s[0] if h1s else meta_title
                             self._add_finding(
                                 severity="high",
-                                title=f"Content discrepancy between Schema.org {t} name and visible DOM",
+                                title=f"Content discrepancy between Schema.org {match_t} name and visible DOM",
                                 detail=(
-                                    f"Schema {t} declares name/headline '{name}', but visible heading displays '{display_target}'. "
+                                    f"Schema {match_t} declares name/headline '{name}', but visible heading/title shows '{display_target}'. "
                                     f"Low token match ({int(overlap * 100)}%) creates conflicting entity signals for AI models (Anti-Pattern AP-05)."
                                 ),
                                 affected_urls=[url],
-                                recommendation=f"Align Schema.org {t} name with the primary visible heading on the page.",
+                                recommendation=f"Align Schema.org {match_t} name with the primary visible heading or title on the page.",
                             )
 
             # 2. Pricing Discrepancies between Schema Offer and DOM text (AP-05)
@@ -692,8 +705,11 @@ class SchemaValidator:
             checked_price_values = set()
             for ent in all_entities:
                 t = ent.get("@type")
-                if t == "Offer" or (t == "Product" and isinstance(ent.get("offers"), dict) and ent.get("offers").get("@type") != "Offer"):
-                    offer_ent = ent if t == "Offer" else ent.get("offers")
+                t_list = t if isinstance(t, list) else ([t] if t else [])
+                is_offer = "Offer" in t_list
+                is_product = "Product" in t_list
+                if is_offer or (is_product and isinstance(ent.get("offers"), dict) and ent.get("offers").get("@type") != "Offer"):
+                    offer_ent = ent if is_offer else ent.get("offers")
                     if isinstance(offer_ent, dict):
                         raw_price = offer_ent.get("price")
                         currency = offer_ent.get("priceCurrency", "")
@@ -725,7 +741,9 @@ class SchemaValidator:
             # 3. Publication Date Conflicts
             for ent in all_entities:
                 t = ent.get("@type")
-                if t in ("Article", "BlogPosting", "NewsArticle"):
+                t_list = t if isinstance(t, list) else ([t] if t else [])
+                article_t = next((x for x in t_list if x in ("Article", "BlogPosting", "NewsArticle")), None)
+                if article_t:
                     date_pub = ent.get("datePublished")
                     if date_pub and isinstance(date_pub, str) and detected_dates:
                         schema_year_match = re.search(r"\b(19\d\d|20\d\d)\b", date_pub)
@@ -737,7 +755,7 @@ class SchemaValidator:
                                     severity="medium",
                                     title="Publication date conflict between Schema and visible page text",
                                     detail=(
-                                        f"Schema {t} specifies datePublished '{date_pub}' (year {schema_year}), but visible date text "
+                                        f"Schema {article_t} specifies datePublished '{date_pub}' (year {schema_year}), but visible date text "
                                         f"references {', '.join(detected_dates)}. AI engines rely on synchronized timestamps for freshness scoring."
                                     ),
                                     affected_urls=[url],

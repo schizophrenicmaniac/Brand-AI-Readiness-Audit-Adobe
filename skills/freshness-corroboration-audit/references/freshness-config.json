@@ -12,8 +12,7 @@
     "stale_threshold_months": 12,
     "critical_pricing_threshold_months": 24,
     "http_headers": [
-      "last-modified",
-      "date"
+      "last-modified"
     ],
     "meta_tags": [
       "article:published_time",
@@ -74,7 +73,7 @@
     ],
     "dead_link_check": {
       "enabled": true,
-      "max_links_per_page": 20,
+      "max_links_per_page": 6,
       "timeout_seconds": 5
     }
   },

@@ -73,10 +73,18 @@ def _normalize_input(raw: str) -> str:
     return origin + (p.path if p.path else "/")
 
 
+def _reg_host(h: str) -> str:
+    """Registrable host for same-site comparison: drop a leading 'www.'. Most sites
+    canonicalize apex<->www (e.g. input example.com but the sitemap lists www.example.com),
+    so an exact-hostname match would reject every interior page and audit only the homepage."""
+    h = (h or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
 def _choose_pages(home, sitemap_page_urls, robots_groups, max_pages):
     import url_utils
     from robots_analyzer import evaluate_bot
-    host = (urlparse(home).hostname or "").lower()
+    host = _reg_host(urlparse(home).hostname)
     priority_kw = ("/about", "/pricing", "/price", "/product", "/services", "/service",
                    "/contact", "/blog", "/faq", "/features", "/plans", "/solutions")
 
@@ -88,7 +96,7 @@ def _choose_pages(home, sitemap_page_urls, robots_groups, max_pages):
     candidates = []
     for u in sorted(set(sitemap_page_urls or [])):
         pu = urlparse(u)
-        if (pu.hostname or "").lower() != host:
+        if _reg_host(pu.hostname) != host:
             continue
         n = url_utils.normalize_url(u)
         if n in seen:
@@ -140,7 +148,7 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
     }
 
     # Refuse to audit unsafe targets (SSRF): emit a valid, empty report explaining why.
-    safe_http.install(allow_private=allow_private)
+    safe_http.install(allow_private=allow_private, spacing=0.3)
     safe_http.set_deadline_seconds(budget_seconds)
     try:
         safe_http.validate_url(home, allow_private=allow_private)
@@ -194,10 +202,24 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
         nonlocal pages_raw
         pages_raw = page_fetcher.analyze(
             home, page_paths=chosen,
-            max_pages=min(max_pages + 4, 12), max_depth=3,
+            max_pages=min(max_pages, 8), max_depth=2,
             sitemap_urls=(sitemap or {}).get("page_urls"))
         return crawl_analyzer.compile_findings(robots, sitemap, pages_raw)
     findings += _run_skill("crawl-access-audit", _crawl, coverage)
+
+    # Coverage fallback: when the site has no usable sitemap, page selection above yields
+    # only the homepage. Reuse the internal links the crawl graph already discovered so the
+    # content skills (render/structured/freshness/engagement) audit real interior pages too,
+    # not just the homepage. Robots/auth filtering is re-applied by _choose_pages.
+    if len(chosen) <= 1:
+        discovered = (pages_raw.get("crawl_graph", {}) or {}).get("discovered_urls", [])
+        if discovered:
+            chosen, extra_auth, extra_robots = _choose_pages(home, discovered, robots_groups, max_pages)
+            interior = chosen[1:]
+            coverage["pages_selected"] = chosen
+            coverage["skipped_auth_action"] = sorted(set(skipped_auth + extra_auth))
+            coverage["skipped_by_robots"] = sorted(set(skipped_robots + extra_robots))
+            coverage["interior_from_crawl_graph"] = bool(interior)
 
     # --- render-extraction (static; browser if Playwright present) ----------
     def _render():

@@ -160,8 +160,11 @@ def extract_date_signals(resp: requests.Response, soup: BeautifulSoup, entities:
         "parsed_dates": [],
     }
 
-    # 1. HTTP Headers
-    for header in date_cfg.get("http_headers", ["last-modified", "date"]):
+    # 1. HTTP Headers.  NOTE: only Last-Modified is a content-modification signal.
+    # The generic `Date` response header is the moment the response was generated
+    # (≈ now on every request), so it must NOT be treated as a freshness date — doing
+    # so makes every page look <30d fresh and masks all missing/stale-date detection.
+    for header in date_cfg.get("http_headers", ["last-modified"]):
         val = resp.headers.get(header)
         if val:
             signals["http_headers"][header] = val
@@ -413,6 +416,16 @@ def extract_entity_data(soup: BeautifulSoup, entities: list, base_url: str) -> d
     return entity_data
 
 
+def _normalize_name(s: str) -> str:
+    """Lowercase, strip punctuation and a trailing corporate suffix, collapse spaces.
+    Used for entity-grounding matches so we require a real name equality rather than a
+    loose substring hit (which matched unrelated Wikipedia/Wikidata entities)."""
+    s = re.sub(r"\(.*?\)", " ", s or "")            # drop "(disambiguation)" suffixes
+    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
+    s = re.sub(r"\b(inc|llc|ltd|limited|corp|corporation|co|company|gmbh|plc|sa|ag)\b", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requests.Session) -> dict:
     """Check entity presence on Wikipedia and Wikidata via public APIs and sameAs links."""
     endpoints = _CONFIG.get("grounding_endpoints", {})
@@ -465,7 +478,7 @@ def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requ
                 search_results = data.get("query", {}).get("search", [])
                 for item in search_results:
                     title = item.get("title", "")
-                    if title.lower() == brand_name.lower() or brand_name.lower() in title.lower():
+                    if _normalize_name(title) == _normalize_name(brand_name):
                         result["wikipedia"]["has_entry"] = True
                         result["wikipedia"]["title"] = title
                         result["wikipedia"]["url"] = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
@@ -490,7 +503,7 @@ def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requ
                 search_results = data.get("search", [])
                 for item in search_results:
                     label = item.get("label", "")
-                    if label.lower() == brand_name.lower() or brand_name.lower() in label.lower():
+                    if _normalize_name(label) == _normalize_name(brand_name):
                         result["wikidata"]["has_entry"] = True
                         result["wikidata"]["qid"] = item.get("id")
                         result["wikidata"]["description"] = item.get("description", "")

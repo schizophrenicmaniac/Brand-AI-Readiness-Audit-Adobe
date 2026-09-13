@@ -15,6 +15,7 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 _SKILLS = os.path.join(_ROOT, "skills")
 for _p in [
     os.path.join(_ROOT, "lib"),
+    os.path.join(_SKILLS, "audit-orchestrator", "scripts"),
     os.path.join(_SKILLS, "crawl-access-audit", "scripts"),
     os.path.join(_SKILLS, "render-extraction-audit", "scripts"),
     os.path.join(_SKILLS, "structured-data-audit", "scripts"),
@@ -27,6 +28,7 @@ for _p in [
 import report
 import safe_http
 import crawl_analyzer
+import page_fetcher
 import render_analyzer
 import engagement_analyzer
 from schema_validator import SchemaValidator
@@ -207,6 +209,54 @@ def test_combined_report_validates():
                                  pages_audited=2, proactive_improvements=[{"title": "t"}])
     report.validate_report(rep)
     assert rep["summary"]["total_findings"] == len(report.dedupe_findings(all_findings))
+
+
+def test_fp_regressions():
+    """Locks in the false-positive / coverage fixes so they don't regress."""
+    import time
+
+    # (A) An HTTP Last-Modified/Date header (≈ now on CDNs) must NOT yield a positive
+    #     "fresh" claim — only a real content date (meta/schema/visible) can.
+    raw = {"site": "https://ex.com",
+           "entity": {"detected_brand_name": "Ex", "aggregated_claims": {}, "sameAs_links": []},
+           "grounding": {"wikipedia": {"has_entry": False}, "wikidata": {"has_entry": False}},
+           "corroboration_templates": [],
+           "pages": [{"url": "https://ex.com/", "status_code": 200, "content_type": "text/html",
+                      "date_signals": {"has_any_date_signal": True,
+                                       "freshest_date": {"source": "header:last-modified", "timestamp": time.time()},
+                                       "http_headers": {"last-modified": "now"}},
+                      "staleness_markers": {}, "entity_data": {"nap": {}}}]}
+    ftitles = " | ".join(f["title"].lower() for f in FreshnessValidator(raw).run_all())
+    assert "freshness signals verified" not in ftitles, ftitles
+
+    # (B) soft-404 is conservative: SPA shell / short page and "oops"-in-JS are NOT soft-404;
+    #     an explicit not-found title/heading IS.
+    assert page_fetcher.detect_soft_404(200, "<html><body><div id='root'></div></body></html>", None)["detected"] is False
+    assert page_fetcher.detect_soft_404(200, "<script>x='oops'</script><body>Welcome</body>", "Home")["detected"] is False
+    assert page_fetcher.detect_soft_404(200, "<body><h1>Page not found</h1></body>", "Page Not Found")["detected"] is True
+
+    # (C) TLS: a connection/timeout blip must NOT be CRITICAL; a real verification failure must be.
+    def _tls(v):
+        return crawl_analyzer.compile_findings({}, {}, {"domain": "x.com", "tls": v, "pages": []})
+    t1 = _tls({"error": "TLS connection timeout", "valid": False, "verification_failed": False})
+    assert all(f["severity"] != "critical" for f in t1) and any(f["severity"] == "low" for f in t1)
+    t2 = _tls({"error": "cert verify failed", "valid": False, "verification_failed": True})
+    assert any(f["severity"] == "critical" for f in t2)
+
+    # (D) collapse_repeats folds the same site-wide issue reported per page into one.
+    def mk(url):
+        return report.make_finding("structured-data-audit", "SD-02", "medium",
+                                   "Recommended properties missing in WebSite schema", "add props",
+                                   evidence_url=url, evidence_source="html", evidence_observed="x")
+    collapsed = report.collapse_repeats([mk("https://a/"), mk("https://a/b"), mk("https://a/c")])
+    assert len(collapsed) == 1 and "Affects 3 pages" in collapsed[0]["evidence"]["observed"]
+
+    # (E) apex/www: interior www pages ARE selected for an apex-domain input (no homepage-only audit).
+    import run_audit
+    assert run_audit._reg_host("www.x.com") == run_audit._reg_host("x.com")
+    chosen, _, _ = run_audit._choose_pages(
+        "https://x.com/", ["https://www.x.com/pricing", "https://www.x.com/about"], [], 8)
+    assert len(chosen) >= 3, chosen
 
 
 def main():

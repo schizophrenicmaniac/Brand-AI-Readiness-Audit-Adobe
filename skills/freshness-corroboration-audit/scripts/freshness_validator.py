@@ -173,7 +173,13 @@ class FreshnessValidator:
                             "is_commercial": is_comm,
                         })
                 elif age_months <= 1:
-                    pages_with_fresh_dates.append(url)
+                    # Only claim a page is "freshly updated" when the recent date comes from a
+                    # real content signal (meta/schema/visible text). An HTTP Last-Modified/Date
+                    # header is often just the CDN/cache generation time (≈ now on static pages),
+                    # so a header alone must NOT drive a positive freshness claim (false positive).
+                    src = str(freshest.get("source", "")).split(":")[0]
+                    if src in ("meta", "schema", "visible_text"):
+                        pages_with_fresh_dates.append(url)
 
         # Critical finding: Pricing page dates extremely stale (> 24 months)
         if pages_critical_pricing_dates:

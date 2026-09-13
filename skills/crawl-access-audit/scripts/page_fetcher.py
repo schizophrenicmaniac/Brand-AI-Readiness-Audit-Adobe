@@ -163,6 +163,7 @@ def check_tls(hostname: str, port: int = 443) -> dict:
         "expires": None,
         "days_until_expiry": None,
         "hostname_match": False,
+        "verification_failed": False,
         "error": None,
     }
     try:
@@ -182,10 +183,12 @@ def check_tls(hostname: str, port: int = 443) -> dict:
                 result["valid"] = True
     except ssl.SSLCertVerificationError as e:
         result["error"] = f"Certificate verification failed: {str(e)[:200]}"
+        result["verification_failed"] = True  # a real cert problem, not a network blip
         if "hostname mismatch" in str(e).lower():
             result["hostname_match"] = False
     except ssl.SSLError as e:
         result["error"] = f"SSL error: {str(e)[:200]}"
+        result["verification_failed"] = True
     except socket.timeout:
         result["error"] = "TLS connection timeout"
     except Exception as e:
@@ -256,36 +259,35 @@ def detect_challenge_page(body: str, headers: dict, status_code: int) -> dict:
 # Soft-404 Detection
 # ---------------------------------------------------------------------------
 def detect_soft_404(status_code: int, body: str, title: str) -> dict:
-    """Detect soft-404 pages (200 status but functionally a 404)."""
+    """Detect soft-404 pages (200 status but functionally a 404).
+
+    Conservative on purpose: a genuinely short/empty 200 page is NOT a soft-404 on its own
+    (that pattern also matches JS/SPA shells, image landing pages, and coming-soon pages —
+    those are reported by render-extraction, not here). We require an explicit not-found
+    signal in the <title> or the VISIBLE text (raw HTML is not scanned, so "oops"/"error"
+    strings buried in inline scripts don't trigger a false positive)."""
     if status_code != 200:
         return {"detected": False, "rule": None}
 
-    # Strip HTML tags for text length check
-    text_only = re.sub(r"<[^>]+>", "", body or "").strip() if body else ""
+    # Visible text only — strip tags (incl. <script>/<style> contents) before matching.
+    stripped = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body or "", flags=re.DOTALL | re.IGNORECASE)
+    text_only = re.sub(r"<[^>]+>", " ", stripped)
+    text_lower = re.sub(r"\s+", " ", text_only).strip().lower()
 
-    # Rule 1: Very short body
-    if len(text_only) < _SOFT_404_MIN_BODY_CHARS:
-        return {"detected": True, "rule": f"Body text < {_SOFT_404_MIN_BODY_CHARS} characters"}
-
-    # Rule 2: Body contains 404-like patterns
-    body_lower = (body or "").lower()
-    for pattern in SOFT_404_PATTERNS:
-        if pattern in body_lower:
-            # Additional check: make sure "404" isn't just in a nav/footer link
-            # by verifying it appears in a prominent position (title, h1, or main content)
-            if pattern == "not found" and body_lower.count(pattern) == 1:
-                # Could be a false positive in a single link — check title
-                if title and pattern in title.lower():
-                    return {"detected": True, "rule": f"Title contains '{pattern}'"}
-                continue
-            return {"detected": True, "rule": f"Body contains '{pattern}'"}
-
-    # Rule 3: Title contains 404 patterns
+    # Rule 1: Title explicitly signals not-found (strongest signal).
     if title:
         title_lower = title.lower()
         for indicator in SOFT_404_TITLE_INDICATORS:
             if indicator in title_lower:
                 return {"detected": True, "rule": f"Title contains '{indicator}'"}
+
+    # Rule 2: A strong not-found phrase in the visible text.
+    for pattern in SOFT_404_PATTERNS:
+        if pattern in text_lower:
+            # "not found" alone is weak (e.g. "no results found"): only trust it in the title.
+            if pattern == "not found":
+                continue
+            return {"detected": True, "rule": f"Body contains '{pattern}'"}
 
     return {"detected": False, "rule": None}
 
@@ -490,7 +492,10 @@ def bfs_crawl(start_url: str, max_pages: int, max_depth: int, robots_groups: lis
                 current_url, timeout=10, allow_redirects=True,
                 headers={"User-Agent": "BrandAIReadinessAudit/1.0"}
             )
-            if resp.status_code >= 400:
+            # Only genuinely broken responses count. 401/403/429 (and 999) are
+            # access-restricted / rate-limited for the audit UA, not broken links —
+            # treating bot-blocking as a site defect is a false positive.
+            if resp.status_code in (404, 410) or resp.status_code >= 500:
                 broken_internal_links.append({
                     "url": current_url,
                     "status": resp.status_code,

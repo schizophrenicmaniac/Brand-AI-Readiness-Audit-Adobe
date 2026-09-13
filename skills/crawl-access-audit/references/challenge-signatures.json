@@ -66,8 +66,6 @@
     "we couldn't find",
     "this page has been removed",
     "page has moved",
-    "oops",
-    "nothing here",
     "page you requested",
     "page doesn't exist"
   ],
@@ -75,7 +73,7 @@
   "soft_404_title_indicators": [
     "404",
     "not found",
-    "error",
+    "page not found",
     "page missing"
   ],
 

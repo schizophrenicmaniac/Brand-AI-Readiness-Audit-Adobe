@@ -109,11 +109,19 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
     domain = pages.get("domain", "")
     site_root = f"https://{domain}/" if domain else robots_url
     if tls:
-        if tls.get("error") and not tls.get("valid"):
+        if tls.get("verification_failed"):
             add("CA-13-tls-invalid", "critical",
-                "TLS certificate is invalid or connection failed",
+                "TLS certificate is invalid (verification failed)",
                 "Fix the TLS certificate (validity, chain, hostname match). An invalid certificate "
                 "blocks HTTPS crawlers and destroys trust signals.",
+                site_root, "tls", str(tls.get("error"))[:300], locator="certificate")
+        elif tls.get("error") and not tls.get("valid"):
+            # A raw-socket connection/timeout failure (common behind proxies/CI) is NOT
+            # evidence of a bad certificate — pages may still fetch fine over HTTPS.
+            add("CA-13-tls-unverified", "low",
+                "Could not verify TLS certificate (connection issue)",
+                "Re-run the TLS check from a network that can open a direct socket to port 443; "
+                "this is a probe limitation, not necessarily a certificate defect.",
                 site_root, "tls", str(tls.get("error"))[:300], locator="certificate")
         elif tls.get("valid"):
             days = tls.get("days_until_expiry")

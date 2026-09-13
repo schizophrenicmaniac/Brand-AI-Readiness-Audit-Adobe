@@ -15,6 +15,7 @@ Import compile_findings(raw, rendered) from the orchestrator, or run standalone.
 import argparse
 import json
 import os
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -27,6 +28,20 @@ from report import make_finding  # noqa: E402
 SKILL = "render-extraction-audit"
 
 _CONTENT_CANVAS_HINTS = ("chart", "graph", "product", "config", "map", "diagram", "plot")
+
+# Third-party widgets (cookie-consent banners, chat launchers) commonly inject text via
+# JS that is absent from the raw HTML. That text is not page content, so it must not
+# escalate the JS-rendering-gap finding to HIGH. Strip it before key-fact detection.
+_WIDGET_NOISE = re.compile(
+    r"(we use cookies|accept (all )?cookies|cookie (policy|preferences|settings|consent|notice)|"
+    r"manage (your )?(cookies|preferences)|privacy preferences|your privacy|consent|gdpr|"
+    r"how can we help|chat with us|live chat|start (a )?chat|message us|we'?re (online|here)|"
+    r"leave a message|powered by (intercom|drift|zendesk|tawk|crisp|hubspot))",
+    re.IGNORECASE)
+
+
+def _strip_widget_noise(text: str) -> str:
+    return _WIDGET_NOISE.sub(" ", text or "")
 
 
 def _detect_key_facts(text):
@@ -77,8 +92,12 @@ def compile_findings(raw=None, rendered=None) -> list:
             diff = rp.get("js_content_diff", {})
             jd_len = diff.get("js_dependent_text_length", 0)
             if jd_len > 50:
-                key_facts = _detect_key_facts(diff.get("js_dependent_preview", ""))
-                sev = "high" if key_facts else "medium"
+                # Ignore consent/chat-widget text before deciding whether real key facts
+                # (pricing, contact, specs) are JS-only. Only escalate to HIGH when a
+                # substantial amount of JS-only text carries key facts — a short banner does not.
+                cleaned_preview = _strip_widget_noise(diff.get("js_dependent_preview", ""))
+                key_facts = _detect_key_facts(cleaned_preview)
+                sev = "high" if (key_facts and jd_len >= 200) else "medium"
                 fact_note = f" key facts: {', '.join(sorted({k['label'] for k in key_facts}))}" if key_facts else ""
                 add("RE-01-jsgap", sev, "Content appears only after JavaScript execution",
                     "Ensure important content is present in the initial HTML (SSR/SSG) so non-JS "
