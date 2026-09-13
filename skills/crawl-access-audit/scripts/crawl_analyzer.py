@@ -87,11 +87,18 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
     cpb = robots.get("critical_path_blocks", [])
     if cpb:
         paths = ", ".join(sorted({b.get("path", "?") for b in cpb}))
+        bot_paths = {}
+        for block in cpb:
+            bot_paths.setdefault(block.get("user_agent", "?"), set()).add(block.get("path", "?"))
+        attributed = "; ".join(
+            f"{bot}: {', '.join(sorted(blocked_paths))}"
+            for bot, blocked_paths in sorted(bot_paths.items())
+        )
         add("CA-02-critpath", "high",
             "High-value paths disallowed in robots.txt",
-            f"Review Disallow rules covering high-value paths ({paths}); if these pages should be "
-            "indexed, remove or narrow the rules.",
-            robots_url, "robots_txt", f"Blocked high-value paths: {paths}", locator="Disallow")
+            f"Review Disallow rules covering high-value paths ({paths}) for the named crawlers; "
+            "if these pages should be indexed, remove or narrow the applicable rules.",
+            robots_url, "robots_txt", f"Blocked crawler/path pairs: {attributed}", locator="Disallow")
 
     for cd in robots.get("crawl_delay_issues", []):
         sev = cd.get("severity", "low")
@@ -168,10 +175,24 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
 
         # CA-08 status
         if status is not None and status != 200:
+            if status == 403:
+                status_action = (
+                    "Review CDN/WAF and origin access controls for this URL. Permit intended verified "
+                    "search/retrieval crawlers through the rule that denied the request, while retaining "
+                    "authentication and bot protections for restricted traffic."
+                )
+            elif status in (404, 410):
+                status_action = (
+                    "Restore the page with HTTP 200 if it should be indexed; if it is intentionally gone, "
+                    "remove its internal links and sitemap entry or redirect to a true replacement."
+                )
+            else:
+                status_action = (
+                    "Return HTTP 200 for content intended for indexing, or correct the server, routing, "
+                    "authentication, or rate-limit condition responsible for this response."
+                )
             add("CA-08-status", _status_severity(status, home),
-                f"Page returns HTTP {status}",
-                "Return HTTP 200 for pages that should be indexed, or remove them from navigation "
-                "and sitemaps if intentionally gone.",
+                f"Page returns HTTP {status}", status_action,
                 url, "http_status", f"HTTP {status}", locator="status", expected="200")
         # CA-08 soft-404
         if page.get("is_soft_404"):
@@ -247,9 +268,10 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
         ch = page.get("challenge_page", {})
         if ch.get("detected"):
             add("CA-12-challenge", "high" if home else "medium",
-                "Bot-challenge/CAPTCHA page served to the audit client",
-                "Allowlist legitimate AI/search crawlers past the bot-challenge (provider WAF rules); "
-                "a challenge page hides real content from retrieval systems.",
+                "Bot challenge or WAF denial served to the audit client",
+                "Review the identified CDN/WAF rule and use provider-supported verified-bot controls "
+                "or narrowly scoped access rules so intended search/retrieval crawlers receive the real "
+                "page. Do not trust a spoofable User-Agent string as the sole allowlist condition.",
                 url, "http_status",
                 f"{ch.get('provider')}: {ch.get('signal')}", locator="challenge")
 
@@ -337,12 +359,22 @@ def compile_findings(robots=None, sitemap=None, pages=None) -> list:
     if orphans.get("checked") and orphans.get("count"):
         conf = orphans.get("confidence", "")
         sev = "low" if conf == "bounded_crawl" else "medium"
-        add("CA-06-orphans", sev,
-            f"{orphans['count']} sitemap URL(s) not reachable via internal links",
-            "Add internal links to orphaned pages so crawlers can discover them without relying on "
-            "the sitemap alone.",
+        if conf == "bounded_crawl":
+            title = f"{orphans['count']} sitemap URL(s) not observed in the bounded link crawl"
+            action = (
+                "Investigate these candidates with a broader/rendered crawl and navigation review. "
+                "Only add or change internal links if that verification confirms a discovery gap."
+            )
+        else:
+            title = f"{orphans['count']} potential orphan sitemap URL(s)"
+            action = (
+                "Verify these candidates across rendered navigation, templates, and other entry pages; "
+                "if they are intended for discovery and truly lack links, add relevant internal links."
+            )
+        add("CA-06-orphans", sev, title, action,
             site_root, "crawl_graph",
-            f"{'; '.join(orphans.get('urls', [])[:4])} (confidence: {conf})", locator="orphan")
+            f"Not observed: {'; '.join(orphans.get('urls', [])[:4])} (confidence: {conf})",
+            locator="orphan_candidate")
 
     return findings
 

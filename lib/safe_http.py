@@ -123,10 +123,40 @@ def _origin(url: str) -> str:
     return f"{p.scheme}://{p.hostname}:{p.port or ''}"
 
 
-def _check_deadline():
+def _remaining_deadline():
+    """Return remaining deadline seconds, or None when no deadline is configured."""
     dl = _POLICY["deadline_monotonic"]
-    if dl is not None and time.monotonic() >= dl:
+    if dl is None:
+        return None
+    remaining = dl - time.monotonic()
+    if remaining <= 0:
         raise DeadlineExceeded("global audit deadline reached")
+    return remaining
+
+
+def _check_deadline():
+    _remaining_deadline()
+
+
+def _bounded_timeout(timeout):
+    """Cap connect/read timeouts by the global time remaining."""
+    configured = _POLICY["timeout"]
+    value = configured if timeout is None else timeout
+    remaining = _remaining_deadline()
+
+    def cap(part, default):
+        if part is None:
+            part = default
+        if remaining is not None:
+            part = remaining if part is None else min(float(part), remaining)
+        return part
+
+    if isinstance(value, tuple):
+        defaults = configured if isinstance(configured, tuple) else (configured,) * len(value)
+        return tuple(cap(part, defaults[index] if index < len(defaults) else None)
+                     for index, part in enumerate(value))
+    default = configured if not isinstance(configured, tuple) else configured[0]
+    return cap(value, default)
 
 
 def _respect_spacing(url: str):
@@ -181,22 +211,26 @@ class SafeSession(requests.Session):
         redirects = kwargs.get("allow_redirects", True)
         key = (method, url, bool(redirects))
 
-        if method in ("GET", "HEAD") and key in _POLICY["cache"]:
+        if method not in ("GET", "HEAD"):
+            raise UnsafeRequestError(
+                f"blocked HTTP method {method!r}; audit traffic is read-only (GET/HEAD only)"
+            )
+
+        if key in _POLICY["cache"]:
             return _POLICY["cache"][key]
 
         _check_deadline()
         validate_url(url, allow_private=_POLICY["allow_private"])
         _respect_spacing(url)
 
-        kwargs.setdefault("timeout", _POLICY["timeout"])
+        kwargs["timeout"] = _bounded_timeout(kwargs.get("timeout"))
         kwargs["stream"] = True  # stream so we can cap the body ourselves
         resp = super().send(request, **kwargs)
         _POLICY["last_request_at"][_origin(url)] = time.monotonic()
 
         if method != "HEAD":
             _cap_body(resp)
-        if method in ("GET", "HEAD"):
-            _POLICY["cache"][key] = resp
+        _POLICY["cache"][key] = resp
         return resp
 
 

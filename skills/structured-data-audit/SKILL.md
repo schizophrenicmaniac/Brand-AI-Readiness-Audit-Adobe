@@ -10,6 +10,7 @@ description: >
   title and meta description quality, llms.txt presence, and cross-references
   structured markup against visible DOM content.
 license: MIT
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Structured-Data Audit

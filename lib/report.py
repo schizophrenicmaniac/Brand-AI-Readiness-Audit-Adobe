@@ -244,7 +244,7 @@ REPORT_SCHEMA = {
 
 
 def validate_report(report):
-    """Raise if the report violates the contract. Returns the report on success."""
+    """Raise if the report violates the schema or semantic contract."""
     if Draft7Validator is None:
         raise RuntimeError("jsonschema not installed; cannot validate report")
     errors = sorted(Draft7Validator(REPORT_SCHEMA).iter_errors(report),
@@ -252,4 +252,42 @@ def validate_report(report):
     if errors:
         msgs = "; ".join(f"{list(e.path)}: {e.message}" for e in errors[:8])
         raise ValueError(f"report failed schema validation: {msgs}")
+
+    semantic_errors = []
+    findings = report["findings"]
+    seen_ids = set()
+    duplicate_ids = set()
+    for finding in findings:
+        finding_id = finding["id"]
+        if finding_id in seen_ids:
+            duplicate_ids.add(finding_id)
+        seen_ids.add(finding_id)
+    duplicate_ids = sorted(duplicate_ids)
+    if duplicate_ids:
+        semantic_errors.append(f"finding ids must be unique: {', '.join(duplicate_ids[:8])}")
+
+    actual_counts = {severity: 0 for severity in SEVERITIES}
+    for finding in findings:
+        actual_counts[finding["severity"]] += 1
+    summary = report["summary"]
+    if summary["total_findings"] != len(findings):
+        semantic_errors.append(
+            f"summary.total_findings is {summary['total_findings']}, expected {len(findings)}"
+        )
+    for severity in SEVERITIES:
+        if severity in summary and summary[severity] != actual_counts[severity]:
+            semantic_errors.append(
+                f"summary.{severity} is {summary[severity]}, expected {actual_counts[severity]}"
+            )
+
+    audited_at = report["audited_at"]
+    try:
+        parsed_at = datetime.fromisoformat(audited_at.replace("Z", "+00:00"))
+        if parsed_at.tzinfo is None or parsed_at.utcoffset() != timezone.utc.utcoffset(parsed_at):
+            semantic_errors.append("audited_at must be an ISO 8601 timestamp in UTC")
+    except (TypeError, ValueError):
+        semantic_errors.append("audited_at must be a valid ISO 8601 timestamp in UTC")
+
+    if semantic_errors:
+        raise ValueError(f"report failed semantic validation: {'; '.join(semantic_errors[:12])}")
     return report

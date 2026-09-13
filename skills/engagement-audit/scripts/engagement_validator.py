@@ -1,29 +1,21 @@
 #!/usr/bin/env python3
-"""engagement_validator.py — Validate engagement, navigation, orientation, mobile, performance, and CTA metrics.
+"""Validate extracted engagement evidence and emit shared-contract findings.
 
-Part of the engagement-audit skill in the Brand AI Readiness Audit marketplace.
-Analyzes raw extracted engagement metrics and emits standardized findings (eg-001, eg-002, ...)
-categorized by severity and check ID.
+Integration:
+    EngagementValidator(raw).run_all() -> list[dict]
 
-Usage:
-    python engagement_validator.py --raw-data /tmp/engagement-raw.json
-    python engagement_validator.py --url https://example.com [--pages /,/pricing]
-
-Output: JSON findings report to stdout or specified file.
+Only successfully fetched HTML pages are eligible for checks. This prevents a
+403, bot challenge, timeout, or non-HTML response from becoming a phantom UX
+finding.
 """
 
 import argparse
-from datetime import datetime, timezone
 import json
 import os
 import re
-import subprocess
 import sys
 from urllib.parse import urlparse
 
-# ---------------------------------------------------------------------------
-# Reference file loader
-# ---------------------------------------------------------------------------
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
 _LIB_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "..", "..", "lib"))
@@ -32,578 +24,369 @@ if _LIB_DIR not in sys.path:
 from report import make_finding  # noqa: E402
 
 
-def _load_json(filename: str) -> dict:
-    path = os.path.join(_REFS_DIR, filename)
+def _load_json(filename):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(os.path.join(_REFS_DIR, filename), "r", encoding="utf-8") as f:
             return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON in {path}: {e}"}), file=sys.stderr)
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
 _CONFIG = _load_json("engagement-config.json")
+SKILL = "engagement-audit"
+_PRIORITY = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
 class EngagementValidator:
     def __init__(self, raw_data: dict):
-        self.raw_data = raw_data
-        self.site_url = raw_data.get("site", "")
-        self.pages = raw_data.get("pages", [])
+        self.raw_data = raw_data if isinstance(raw_data, dict) else {}
+        self.site_url = self.raw_data.get("site", "")
+        self.pages = self.raw_data.get("pages", []) if isinstance(self.raw_data.get("pages", []), list) else []
         self.findings = []
-        self._finding_counter = 1
 
-    def _add_finding(self, severity: str, title: str, detail: str, affected_urls: list, recommendation: str, check_id: str = "EG"):
-        url = affected_urls[0] if (affected_urls and affected_urls[0]) else (self.site_url or "https://example.com")
+    def _content_pages(self):
+        pages = []
+        for page in self.pages:
+            if not isinstance(page, dict):
+                continue
+            status = page.get("status_code")
+            content_type = (page.get("content_type") or "").lower()
+            explicit = page.get("html_success")
+            if explicit is False or not isinstance(status, int) or not 200 <= status < 300:
+                continue
+            if content_type and "html" not in content_type and "xhtml" not in content_type:
+                continue
+            if page.get("fetch_status") in ("blocked", "non_html", "empty", "http_error", "fetch_error"):
+                continue
+            # Backward-compatible raw input may not have html_success/fetch_status. It
+            # is eligible only when at least one extraction section has actual data.
+            if explicit is not True and not any(page.get(key) for key in ("navigation", "orientation", "performance", "mobile", "ctas", "search", "context_retention")):
+                continue
+            pages.append(page)
+        return pages
+
+    def _add(self, check_id, severity, title, detail, urls, recommendation, locator, expected=None):
+        urls = [url for url in (urls or []) if url]
+        url = urls[0] if urls else self.site_url
+        if len(urls) > 1:
+            detail += f" Affected sample: {', '.join(urls[:5])}{' …' if len(urls) > 5 else ''}."
         self.findings.append(make_finding(
-            skill="engagement-audit",
-            check_id=f"{check_id}-{self._finding_counter:03d}",
-            severity=severity,
-            title=title,
-            action_summary=recommendation,
-            evidence_url=url,
-            evidence_source="html",
-            evidence_observed=detail,
-            evidence_locator=""
+            skill=SKILL, check_id=check_id, severity=severity, title=title,
+            action_summary=recommendation, evidence_url=url, evidence_source="html",
+            evidence_observed=detail, evidence_locator=locator,
+            evidence_expected=expected,
         ))
-        self._finding_counter += 1
 
-    def _is_utility_path(self, url: str) -> bool:
-        """Check if URL is a utility page where standard nav/CTA expectations should be suppressed."""
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        patterns = _CONFIG.get("suppression", {}).get("utility_page_patterns", [
-            r"^/login", r"^/signin", r"^/signup", r"^/register", r"^/auth", r"^/logout",
-            r"^/privacy", r"^/terms", r"^/tos", r"^/legal", r"^/cookie", r"^/cart", r"^/checkout"
-        ])
-        return any(re.search(pat, path) for pat in patterns)
+    @staticmethod
+    def _url(page):
+        return page.get("final_url") or page.get("url") or ""
 
-    def _is_commercial_path(self, url: str) -> bool:
-        """Check if URL represents a commercial product or pricing page."""
-        lower = url.lower()
-        return any(term in lower for term in ["/pricing", "/price", "/product", "/plans", "/store", "/shop"])
+    @staticmethod
+    def _kind(page):
+        return (page.get("page_profile") or {}).get("kind", "general")
 
-    def validate_eg01_navigation(self):
-        """EG-01: Navigational clarity and key destinations reachability."""
-        nav_cfg = _CONFIG.get("navigation", {})
-        categories = nav_cfg.get("destination_categories", {
-            "about": ["about", "company", "who-we-are", "mission"],
-            "pricing": ["pricing", "plans", "rates"],
-            "products_services": ["products", "services", "solutions", "features", "catalog"],
-            "contact_support": ["contact", "support", "help", "docs", "documentation"],
-        })
-        category_display_names = {
-            "about": "about",
-            "pricing": "pricing",
-            "products_services": "products/services",
-            "contact_support": "contact/support",
-        }
+    @staticmethod
+    def _is_utility(url):
+        path = urlparse(url).path.lower()
+        patterns = _CONFIG.get("suppression", {}).get("utility_page_patterns", [])
+        return any(re.search(pattern, path) for pattern in patterns)
 
-        homepage_nav = None
-        for p in self.pages:
-            parsed = urlparse(p.get("url", ""))
-            if parsed.path in ("", "/", "/index.html"):
-                homepage_nav = p.get("navigation", {})
-                break
+    @staticmethod
+    def _is_editorial_permalink(page):
+        url = EngagementValidator._url(page)
+        path = urlparse(url).path.lower()
+        return EngagementValidator._kind(page) == "editorial" and bool(
+            re.search(r"/(?:19|20)\d{2}/(?:0?[1-9]|1[0-2])(?:/|$)", path)
+            or len([part for part in path.split("/") if part]) >= 2
+        )
 
-        if not homepage_nav and self.pages:
-            homepage_nav = self.pages[0].get("navigation", {})
+    def validate_eg01_navigation(self, pages):
+        eligible = [p for p in pages if not self._is_utility(self._url(p))]
+        missing = [self._url(p) for p in eligible if not (p.get("navigation") or {}).get("has_primary_nav")]
+        if missing:
+            self._add(
+                "EG-01-nav-structure", "medium", "Primary navigation structure not detected",
+                f"{len(missing)} of {len(eligible)} eligible HTML page(s) expose neither a navigation container nor header navigation links.",
+                missing, "Provide a consistent primary navigation region with descriptive internal links.",
+                "nav, [role=navigation], header navigation", "A primary navigation structure on each standard content page",
+            )
 
-        if homepage_nav:
-            destinations = homepage_nav.get("key_destinations", {})
-            completely_missing = []
-            footer_only = []
+        no_landmark = [self._url(p) for p in eligible if (p.get("navigation") or {}).get("has_primary_nav") and not (p.get("navigation") or {}).get("has_navigation_landmark")]
+        if no_landmark:
+            self._add(
+                "EG-01-nav-landmark", "low", "Primary navigation lacks a semantic landmark",
+                f"{len(no_landmark)} page(s) have inferred header/menu navigation but no <nav> or role=navigation landmark.",
+                no_landmark, "Wrap primary navigation in <nav> or assign role=navigation and an accessible label.",
+                "nav, [role=navigation]",
+            )
 
-            for cat, aliases in categories.items():
-                cat_display = category_display_names.get(cat, cat)
-                found_in_primary = any(destinations.get(a, {}).get("in_primary_nav", False) for a in aliases)
-                found_in_footer = any(destinations.get(a, {}).get("in_footer", False) for a in aliases)
-                found_anywhere = any(destinations.get(a, {}).get("found_anywhere", False) for a in aliases)
-
-                if not found_anywhere:
-                    completely_missing.append(cat_display)
-                elif found_in_footer and not found_in_primary:
-                    footer_only.append(cat_display)
-
-            if len(completely_missing) >= 2:
-                self._add_finding(
-                    severity="critical",
-                    title="Key commercial destinations missing from site navigation",
-                    detail=(
-                        f"Core destinations ({', '.join(completely_missing)}) are absent from navigation. "
-                        "Visitors referred by AI assistants cannot locate pricing, product specs, or contact details."
-                    ),
-                    affected_urls=[self.site_url],
-                    recommendation="Add direct navigation links to pricing, products, about, and contact in the primary header menu.",
-                )
-            elif completely_missing:
-                self._add_finding(
-                    severity="high",
-                    title=f"Navigation lacks direct link to {', '.join(completely_missing)}",
-                    detail=(
-                        f"The primary navigation does not provide links to {', '.join(completely_missing)}. "
-                        "Referred traffic seeking these specific facts will encounter navigation friction."
-                    ),
-                    affected_urls=[self.site_url],
-                    recommendation=f"Introduce links to {', '.join(completely_missing)} within the main header menu.",
+        nav_pages = [p for p in eligible if len((p.get("navigation") or {}).get("primary_nav_labels", [])) >= 2]
+        if len(nav_pages) >= 3:
+            baseline = set((nav_pages[0].get("navigation") or {}).get("primary_nav_labels", []))
+            inconsistent = []
+            for page in nav_pages[1:]:
+                labels = set((page.get("navigation") or {}).get("primary_nav_labels", []))
+                union = baseline | labels
+                similarity = len(baseline & labels) / len(union) if union else 1
+                if similarity < 0.35:
+                    inconsistent.append((self._url(page), round(similarity, 2)))
+            if len(inconsistent) >= 2:
+                details = ", ".join(f"{url} ({score:.0%} label overlap)" for url, score in inconsistent[:4])
+                self._add(
+                    "EG-01-nav-consistency", "medium", "Primary navigation changes substantially across pages",
+                    f"Compared with {self._url(nav_pages[0])}, {len(inconsistent)} page(s) have under 35% navigation-label overlap: {details}.",
+                    [url for url, _ in inconsistent], "Keep core navigation labels and destinations consistent across standard page templates.",
+                    "primary navigation link text", ">=35% label overlap with the sampled baseline navigation",
                 )
 
-            if footer_only:
-                self._add_finding(
-                    severity="medium",
-                    title=f"Key destinations buried only in page footer ({', '.join(footer_only)})",
-                    detail=(
-                        f"Links for {', '.join(footer_only)} appear only in the footer. "
-                        "Visitors arriving on mobile or scanning above-the-fold miss these critical conversion pathways."
-                    ),
-                    affected_urls=[self.site_url],
-                    recommendation="Promote important pathways from the footer into a clean header dropdown or nav bar.",
+        commercial = [p for p in eligible if self._kind(p) == "commercial"]
+        if commercial:
+            aliases = _CONFIG.get("navigation", {}).get("destination_categories", {})
+            missing_path = []
+            for page in commercial:
+                destinations = (page.get("navigation") or {}).get("key_destinations", {})
+                offering = aliases.get("products_services", [])
+                support = aliases.get("contact_support", [])
+                if not any(destinations.get(a, {}).get("found_anywhere") for a in offering + support):
+                    missing_path.append(self._url(page))
+            if missing_path:
+                self._add(
+                    "EG-01-commercial-path", "medium", "Commercial pages lack an offering or support navigation path",
+                    f"{len(missing_path)} commercial-profile page(s) contain no measured link matching product/service or contact/support aliases. Pricing and company links are not required by this check.",
+                    missing_path, "Add a relevant route to offerings, documentation, help, or contact; use labels appropriate to the site.",
+                    "a[href] text/href in page navigation", "At least one context-appropriate offering or support destination",
                 )
 
-            if not completely_missing and not footer_only:
-                self._add_finding(
-                    severity="info",
-                    title="Clear and accessible primary navigation structure detected",
-                    detail="Primary navigation provides direct links to key destinations (about, pricing, products/services, contact/support).",
-                    affected_urls=[self.site_url],
-                    recommendation="Maintain consistent navbar labeling and verify mobile menu toggle operates smoothly.",
-                )
-
-    def validate_eg02_orientation(self):
-        """EG-02: Orientation cues (H1 headings, hero value proposition, and breadcrumbs)."""
-        pages_missing_h1 = []
-        pages_multiple_h1 = []
-        pages_missing_value_prop = []
-        deep_pages_missing_breadcrumbs = []
-        pages_with_good_orientation = []
-
-        for p in self.pages:
-            url = p.get("url", "")
-            if self._is_utility_path(url):
-                continue
-
-            orient = p.get("orientation", {})
-            h1_count = orient.get("h1_count", 0)
-            hero_chars = orient.get("hero_value_prop_chars", 0)
-            has_bc = orient.get("has_breadcrumbs", False)
-            path_depth = orient.get("url_path_depth", 0)
-
-            # H1 checks
-            if h1_count == 0:
-                pages_missing_h1.append(url)
-            elif h1_count > 1:
-                pages_multiple_h1.append(url)
-
-            # Hero value prop on landing / commercial pages
-            is_landing = path_depth <= 1
-            if is_landing and hero_chars < 30:
-                pages_missing_value_prop.append(url)
-
-            # Breadcrumbs on deep interior pages
-            if path_depth >= 2 and not has_bc:
-                deep_pages_missing_breadcrumbs.append(url)
-
-            if h1_count == 1 and hero_chars >= 30:
-                pages_with_good_orientation.append(url)
-
-        if pages_missing_h1:
-            self._add_finding(
-                severity="high",
-                title="Page lacks primary <h1> heading for orientation",
-                detail=(
-                    f"{len(pages_missing_h1)} page(s) lack an <h1> heading: {', '.join(pages_missing_h1[:3])}. "
-                    "Visitors arriving from AI citations lack immediate heading orientation on landing."
-                ),
-                affected_urls=pages_missing_h1,
-                recommendation="Add a descriptive <h1> summarizing the core topic or offering of the page.",
+    def validate_eg02_orientation(self, pages):
+        eligible = [p for p in pages if not self._is_utility(self._url(p))]
+        missing_h1 = [self._url(p) for p in eligible if (p.get("orientation") or {}).get("h1_count", 0) == 0]
+        if missing_h1:
+            self._add(
+                "EG-02-h1-missing", "medium", "Pages lack a primary H1 orientation cue",
+                f"{len(missing_h1)} of {len(eligible)} eligible HTML page(s) have zero non-empty <h1> elements.",
+                missing_h1, "Add a descriptive H1 that states the page topic or purpose.", "h1", "At least one non-empty H1",
+            )
+        multiple = [(self._url(p), (p.get("orientation") or {}).get("h1_count", 0)) for p in eligible if (p.get("orientation") or {}).get("h1_count", 0) > 2]
+        if multiple:
+            self._add(
+                "EG-02-h1-hierarchy", "low", "Page heading hierarchy has several primary headings",
+                f"{len(multiple)} page(s) have more than two H1s; highest measured count is {max(count for _, count in multiple)}.",
+                [url for url, _ in multiple], "Review the heading outline and reserve H1 for primary page topics where practical.", "h1", "A concise primary heading hierarchy",
             )
 
-        if pages_multiple_h1:
-            self._add_finding(
-                severity="medium",
-                title="Multiple conflicting <h1> headings detected on page",
-                detail=(
-                    f"{len(pages_multiple_h1)} page(s) declare multiple <h1> elements: {', '.join(pages_multiple_h1[:3])}. "
-                    "Confuses visual and assistive hierarchy regarding the primary page topic."
-                ),
-                affected_urls=pages_multiple_h1,
-                recommendation="Ensure exactly one primary <h1> per document; downgrade section titles to <h2>.",
+        intro_missing = []
+        for page in eligible:
+            orient = page.get("orientation") or {}
+            path = urlparse(self._url(page)).path.strip("/")
+            landing = not path or self._kind(page) == "commercial"
+            if landing and orient.get("h1_count", 0) and orient.get("hero_value_prop_chars", 0) < 20:
+                intro_missing.append(self._url(page))
+        if intro_missing:
+            self._add(
+                "EG-02-intro-copy", "medium", "Landing pages lack measurable introductory copy",
+                f"{len(intro_missing)} homepage/commercial landing page(s) have an H1 but no introductory paragraph or H2 of at least 20 characters near the start of <main>.",
+                intro_missing, "Add concise introductory copy near the primary heading explaining the page's purpose or offering.",
+                "main p, main h2, hero/intro container", "At least 20 characters of introductory text near the page start",
             )
 
-        if pages_missing_value_prop:
-            self._add_finding(
-                severity="high",
-                title="No clear value proposition or introductory copy above-the-fold",
-                detail=(
-                    f"Landing page(s) lack clear explanatory hero copy: {', '.join(pages_missing_value_prop[:3])}. "
-                    "Referred visitors must scroll or guess what service or product is being offered."
-                ),
-                affected_urls=pages_missing_value_prop,
-                recommendation="Add a concise 1–2 sentence value proposition directly below or beside the main hero title.",
+        breadcrumb_missing = []
+        for page in eligible:
+            orient = page.get("orientation") or {}
+            depth = orient.get("url_path_depth", 0)
+            hierarchy_expected = self._kind(page) in ("documentation", "commercial") or depth >= 3
+            if depth >= 2 and hierarchy_expected and not self._is_editorial_permalink(page) and not orient.get("has_breadcrumbs"):
+                breadcrumb_missing.append(self._url(page))
+        if breadcrumb_missing:
+            self._add(
+                "EG-02-breadcrumb", "low", "Hierarchical interior pages lack breadcrumb cues",
+                f"{len(breadcrumb_missing)} deep documentation/commercial or 3+ segment page(s) expose neither visible nor structured breadcrumbs; editorial permalinks are excluded.",
+                breadcrumb_missing, "Add visible breadcrumbs on genuinely hierarchical templates and optionally mirror them with BreadcrumbList data.",
+                ".breadcrumb, [aria-label*=breadcrumb], BreadcrumbList", "Breadcrumbs on deep hierarchical pages",
             )
 
-        if deep_pages_missing_breadcrumbs:
-            self._add_finding(
-                severity="medium",
-                title="Deep interior pages lack breadcrumb navigation",
-                detail=(
-                    f"{len(deep_pages_missing_breadcrumbs)} deep page(s) lack breadcrumb UI or BreadcrumbList schema: "
-                    f"{', '.join(deep_pages_missing_breadcrumbs[:3])}. Visitors referred directly to deep links cannot discern catalog hierarchy."
-                ),
-                affected_urls=deep_pages_missing_breadcrumbs,
-                recommendation="Implement visible breadcrumbs and JSON-LD BreadcrumbList markup on catalog and documentation pages.",
+    def validate_eg03_performance(self, pages):
+        cfg = _CONFIG.get("performance_red_flags", {})
+        rules = [
+            ("render_blocking_scripts_count", cfg.get("max_render_blocking_scripts", 3), "EG-03-blocking-scripts", "Synchronous head scripts create structural render delay risk", "script[src] in head without async/defer", "Defer or make non-critical scripts asynchronous."),
+            ("external_stylesheets_count", cfg.get("max_external_stylesheets", 4), "EG-03-stylesheets", "Many render-blocking stylesheets are requested from head", "head link[rel=stylesheet]", "Consolidate stylesheets or inline only measured critical CSS where appropriate."),
+            ("third_party_domains_count", cfg.get("max_third_party_domains", 10), "EG-03-third-parties", "Many third-party resource domains are referenced", "external script/link/iframe/img/source hosts", "Audit and consolidate non-essential third-party resources."),
+        ]
+        for field, threshold, check_id, title, locator, action in rules:
+            affected = [(self._url(p), (p.get("performance") or {}).get(field, 0)) for p in pages if (p.get("performance") or {}).get(field, 0) > threshold]
+            if affected:
+                evidence = ", ".join(f"{url}: {count}" for url, count in affected[:4])
+                self._add(check_id, "medium", title, f"Measured threshold >{threshold}; observed {evidence}.", [u for u, _ in affected], action, locator, f"At most {threshold}")
+
+        dimensions = []
+        for page in pages:
+            perf = page.get("performance") or {}
+            if perf.get("total_images", 0) >= 2 and perf.get("images_missing_dimensions", 0) >= 2 and perf.get("images_missing_dimensions_ratio", 0) >= 0.5:
+                dimensions.append((self._url(page), perf.get("images_missing_dimensions"), perf.get("total_images")))
+        if dimensions:
+            summary = ", ".join(f"{url}: {missing}/{total}" for url, missing, total in dimensions[:4])
+            self._add(
+                "EG-03-image-dimensions", "medium", "Most images lack intrinsic dimensions",
+                f"At least 50% and at least two images lack both width and height on {len(dimensions)} page(s): {summary}.",
+                [u for u, _, _ in dimensions], "Provide intrinsic width/height or an equivalent reserved aspect ratio to reduce layout-shift risk.",
+                "img:not([width][height])", "Dimensions on at least half of sampled images",
             )
 
-        if pages_with_good_orientation and not pages_missing_h1 and not pages_missing_value_prop:
-            self._add_finding(
-                severity="info",
-                title="Strong orientation hierarchy verified on key pages",
-                detail="Key landing pages feature clear single <h1> headings and descriptive above-the-fold introductory text.",
-                affected_urls=pages_with_good_orientation[:4],
-                recommendation="Keep introductory copy aligned with search queries that drive visitor referrals.",
+        lazy = [(self._url(p), (p.get("performance") or {}).get("images_missing_lazy_loading", 0), (p.get("performance") or {}).get("below_initial_images", 0)) for p in pages if (p.get("performance") or {}).get("below_initial_images", 0) >= 3 and (p.get("performance") or {}).get("images_missing_lazy_loading", 0) >= 3]
+        if lazy:
+            summary = ", ".join(f"{url}: {missing}/{total}" for url, missing, total in lazy[:4])
+            self._add(
+                "EG-03-image-loading", "low", "Later document images load eagerly",
+                f"Using document order as a static proxy for below-initial content, at least three later images omit loading=lazy: {summary}.",
+                [u for u, _, _ in lazy], "Consider native lazy loading for non-critical images after verifying actual viewport placement.",
+                "img after the first two document images", "loading=lazy on non-critical later images",
             )
 
-    def validate_eg03_performance(self):
-        """EG-03: Load performance red flags (render-blocking scripts, stylesheets, image attributes)."""
-        pages_heavy_scripts = []
-        pages_heavy_css = []
-        pages_cls_images = []
-        pages_no_lazy = []
-        pages_domain_sprawl = []
-
-        for p in self.pages:
-            url = p.get("url", "")
-            perf = p.get("performance", {})
-
-            rb_scripts = perf.get("render_blocking_scripts_count", 0)
-            css_count = perf.get("external_stylesheets_count", 0)
-            missing_dims = perf.get("images_missing_dimensions", 0)
-            missing_lazy = perf.get("images_missing_lazy_loading", 0)
-            domains_count = perf.get("third_party_domains_count", 0)
-
-            if rb_scripts > 3:
-                pages_heavy_scripts.append({"url": url, "count": rb_scripts})
-            if css_count > 4:
-                pages_heavy_css.append({"url": url, "count": css_count})
-            if missing_dims > 0:
-                pages_cls_images.append({"url": url, "count": missing_dims})
-            if missing_lazy >= 3:
-                pages_no_lazy.append({"url": url, "count": missing_lazy})
-            if domains_count > 10:
-                pages_domain_sprawl.append({"url": url, "count": domains_count})
-
-        if pages_heavy_scripts:
-            urls = [p["url"] for p in pages_heavy_scripts]
-            script_summaries = [f"{p['url']} ({p['count']} scripts)" for p in pages_heavy_scripts[:3]]
-            self._add_finding(
-                severity="medium",
-                title="Multiple render-blocking scripts detected in <head>",
-                detail=(
-                    f"Page(s) contain render-blocking script tags: {', '.join(script_summaries)}. "
-                    "Synchronous scripts block HTML parsing and directly inflate First Contentful Paint (FCP)."
-                ),
-                affected_urls=urls,
-                recommendation="Add async or defer attributes to non-critical scripts, or migrate scripts to footer / tag manager.",
+    def validate_eg04_mobile(self, pages):
+        missing = [self._url(p) for p in pages if not (p.get("mobile") or {}).get("has_viewport_meta")]
+        if missing:
+            self._add(
+                "EG-04-viewport-missing", "critical", "Mobile viewport metadata is missing",
+                f"{len(missing)} of {len(pages)} successful HTML page(s) have no non-empty viewport meta tag.",
+                missing, "Add <meta name=viewport content='width=device-width, initial-scale=1'> in head.",
+                "meta[name=viewport]", "width=device-width viewport metadata",
+            )
+        wrong_width = [self._url(p) for p in pages if (p.get("mobile") or {}).get("has_viewport_meta") and not (p.get("mobile") or {}).get("has_width_device")]
+        if wrong_width:
+            self._add(
+                "EG-04-viewport-width", "high", "Viewport does not use device width",
+                f"{len(wrong_width)} page(s) declare viewport metadata without an exact width=device-width directive.",
+                wrong_width, "Set width=device-width while preserving any justified scale directives.",
+                "meta[name=viewport] content", "width=device-width",
+            )
+        zoom = [(self._url(p), (p.get("mobile") or {}).get("viewport_content", "")) for p in pages if (p.get("mobile") or {}).get("disables_zoom")]
+        if zoom:
+            observed = "; ".join(f"{url}: {content}" for url, content in zoom[:3])
+            self._add(
+                "EG-04-zoom", "high", "Viewport configuration restricts user zoom",
+                f"{len(zoom)} page(s) use user-scalable=no/0 or maximum-scale below 2: {observed}.",
+                [u for u, _ in zoom], "Remove user-scalable restrictions and allow at least 200% zoom.",
+                "meta[name=viewport] content", "No user-scalable=no and maximum-scale >= 2 when specified",
             )
 
-        if pages_heavy_css:
-            urls = [p["url"] for p in pages_heavy_css]
-            self._add_finding(
-                severity="medium",
-                title="Excessive external stylesheet requests in <head>",
-                detail=(
-                    f"{len(pages_heavy_css)} page(s) load > 4 external CSS files: {', '.join(urls[:3])}. "
-                    "Increases network round-trips before initial paint."
-                ),
-                affected_urls=urls,
-                recommendation="Bundle and minify CSS files or inline critical CSS to accelerate above-the-fold rendering.",
+    def validate_eg05_ctas(self, pages):
+        eligible = [p for p in pages if not self._is_utility(self._url(p))]
+        missing = []
+        for page in eligible:
+            cta = page.get("ctas") or {}
+            if self._kind(page) == "commercial" and cta.get("total_ctas", 0) == 0:
+                missing.append(self._url(page))
+        if missing:
+            self._add(
+                "EG-05-commercial-cta", "high", "Commercial pages expose no measurable action control",
+                f"{len(missing)} commercial-profile page(s) have zero buttons, styled action links, or recognized action labels.",
+                missing, "Provide a context-specific next action such as purchasing, evaluation, contact, or documentation.",
+                "button, [role=button], styled/action-labelled links", "At least one context-appropriate action control",
             )
 
-        if pages_cls_images:
-            urls = [p["url"] for p in pages_cls_images]
-            self._add_finding(
-                severity="medium",
-                title="Images missing explicit width/height dimensions (CLS risk)",
-                detail=(
-                    f"{len(pages_cls_images)} page(s) feature images without width/height attributes: {', '.join(urls[:3])}. "
-                    "Causes Cumulative Layout Shift (CLS) as images load, jarring arriving readers."
-                ),
-                affected_urls=urls,
-                recommendation="Specify width and height attributes on all <img> elements, using CSS aspect-ratio for responsiveness.",
+        generic = []
+        for page in eligible:
+            cta = page.get("ctas") or {}
+            if self._kind(page) != "editorial" and cta.get("generic_ctas_count", 0) >= 3 and cta.get("generic_cta_ratio", 0) >= 0.6:
+                generic.append((self._url(page), cta.get("generic_ctas_count"), cta.get("generic_cta_ratio"), cta.get("generic_ctas_sample", [])))
+        if generic:
+            worst = max(generic, key=lambda item: item[1])
+            self._add(
+                "EG-05-generic-cta", "low", "Calls to action are dominated by generic labels",
+                f"{len(generic)} non-editorial page(s) have at least three generic CTAs comprising >=60% of measured controls; worst page has {worst[1]} ({worst[2]:.0%}), samples: {', '.join(worst[3][:4])}.",
+                [u for u, _, _, _ in generic], "Replace repeated generic labels with destination-specific action text.",
+                "button/link control text", "Fewer than 3 generic labels or under 60% of measured controls",
             )
 
-        if pages_domain_sprawl:
-            urls = [p["url"] for p in pages_domain_sprawl]
-            self._add_finding(
-                severity="medium",
-                title="Third-party domain sprawl exceeds 10 hostnames",
-                detail=(
-                    f"Pages connect to high volumes of third-party domains: {', '.join(urls[:3])}. "
-                    "Each external domain incurs separate DNS resolution, TLS handshake, and connection overhead."
-                ),
-                affected_urls=urls,
-                recommendation="Consolidate tracking pixels and audit third-party widget scripts to reduce connection latency.",
+        maximum = _CONFIG.get("calls_to_action", {}).get("max_competing_primary_ctas_per_page", 3)
+        overload = [(self._url(p), (p.get("ctas") or {}).get("actionable_ctas_unique_count", (p.get("ctas") or {}).get("actionable_ctas_count", 0))) for p in eligible if (p.get("ctas") or {}).get("actionable_ctas_unique_count", (p.get("ctas") or {}).get("actionable_ctas_count", 0)) > maximum]
+        if overload:
+            evidence = ", ".join(f"{u}: {n}" for u, n in overload[:4])
+            self._add(
+                "EG-05-cta-density", "low", "Many distinct high-intent actions compete on a page",
+                f"Measured actionable CTA count exceeds {maximum}: {evidence}.",
+                [u for u, _ in overload], "Prioritize one primary action and present secondary actions with lower visual emphasis.",
+                "recognized actionable button/link labels", f"At most {maximum} distinct actionable CTA labels",
             )
 
-        if pages_no_lazy:
-            urls = [p["url"] for p in pages_no_lazy]
-            self._add_finding(
-                severity="low",
-                title="Offscreen images lack native loading='lazy' attribute",
-                detail=f"{len(pages_no_lazy)} page(s) load offscreen images eagerly: {', '.join(urls[:3])}.",
-                affected_urls=urls,
-                recommendation="Add loading='lazy' to images below the initial fold to conserve visitor mobile bandwidth.",
+    def validate_eg06_search(self, pages):
+        eligible = [p for p in pages if not self._is_utility(self._url(p))]
+        found = [p for p in eligible if (p.get("search") or {}).get("has_search")]
+        inaccessible = [(self._url(p), (p.get("search") or {}).get("inaccessible_icon_triggers_count", 0)) for p in found if (p.get("search") or {}).get("inaccessible_icon_triggers_count", 0)]
+        if inaccessible:
+            self._add(
+                "EG-06-search-label", "low", "Search icon triggers lack an accessible name",
+                f"{len(inaccessible)} page(s) contain icon-class search triggers with no text, aria-label, or title; highest count is {max(n for _, n in inaccessible)}.",
+                [u for u, _ in inaccessible], "Give icon-only search triggers an aria-label such as 'Search'.", "search trigger accessible name", "Text, aria-label, or title",
+            )
+        content_rich = sum(self._kind(p) in ("documentation", "editorial") for p in eligible)
+        enough_evidence = len(eligible) >= 5 or (len(eligible) >= 3 and content_rich >= 3)
+        if enough_evidence and not found:
+            self._add(
+                "EG-06-search-absent", "medium", "No site-search control found in a content-rich page sample",
+                f"Search inputs/forms/roles/triggers were absent from {len(eligible)} eligible successful pages; {content_rich} were classified as documentation/editorial. Small sites and utility pages are suppressed.",
+                [self._url(p) for p in eligible], "Add discoverable site search when the full content inventory warrants it.",
+                "input/form/[role=search]/labelled search trigger", "A search control in a >=5-page or content-rich >=3-page sample",
             )
 
-    def validate_eg04_mobile(self):
-        """EG-04: Mobile responsiveness and viewport accessibility."""
-        missing_viewport = []
-        disables_zoom = []
-        valid_viewport = []
-
-        for p in self.pages:
-            url = p.get("url", "")
-            mob = p.get("mobile", {})
-
-            if not mob.get("has_viewport_meta", False):
-                missing_viewport.append(url)
-            else:
-                if mob.get("disables_zoom", False):
-                    disables_zoom.append(url)
-                if mob.get("has_width_device", False):
-                    valid_viewport.append(url)
-
-        if missing_viewport:
-            self._add_finding(
-                severity="critical",
-                title="Missing <meta name='viewport'> tag breaks mobile responsiveness",
-                detail=(
-                    f"Page(s) lack a viewport meta tag: {', '.join(missing_viewport[:3])}. "
-                    "Mobile browsers render at standard desktop resolution (980px), forcing microscopic text and instant visitor bounce."
-                ),
-                affected_urls=missing_viewport,
-                recommendation="Add <meta name='viewport' content='width=device-width, initial-scale=1.0'> in <head>.",
+    def validate_eg07_context(self, pages):
+        eligible = [p for p in pages if not self._is_utility(self._url(p))]
+        found = [p for p in eligible if (p.get("context_retention") or {}).get("has_context_retention")]
+        commercial_count = sum(self._kind(p) == "commercial" for p in eligible)
+        if not found and len(eligible) >= 3 and commercial_count >= 2:
+            self._add(
+                "EG-07-continuity-absent", "low", "No continuity feature found across a commercial page sample",
+                f"Across {len(eligible)} successful pages ({commercial_count} commercial-profile), no account link, saved/favorite/history feature, or client-storage hook was detected. General, news, and documentation sites are not required to provide these features.",
+                [self._url(p) for p in eligible], "Consider saved items, recently viewed content, or account continuity only when useful to the visitor journey.",
+                "account/save/history controls or storage hooks", "A relevant continuity mechanism on stateful commercial journeys",
             )
 
-        if disables_zoom:
-            self._add_finding(
-                severity="high",
-                title="Viewport tag restricts pinch-to-zoom (accessibility violation)",
-                detail=(
-                    f"Page(s) configure user-scalable=no or maximum-scale=1.0: {', '.join(disables_zoom[:3])}. "
-                    "Prevents visually impaired visitors from zooming, violating WCAG 1.4.4."
-                ),
-                affected_urls=disables_zoom,
-                recommendation="Remove user-scalable=no and maximum-scale constraints from viewport configuration.",
-            )
-
-        if valid_viewport and not missing_viewport:
-            self._add_finding(
-                severity="info",
-                title="Mobile viewport properly configured for responsive rendering",
-                detail="All audited pages declare responsive width=device-width viewport settings.",
-                affected_urls=valid_viewport[:4],
-                recommendation="Regularly test touch tap target spacing (>= 48x48 CSS px) on physical mobile devices.",
-            )
-
-    def validate_eg05_ctas(self):
-        """EG-05: Calls-to-action clarity and actionability."""
-        commercial_missing_cta = []
-        generic_cta_dominated = []
-        excessive_ctas = []
-        clear_ctas = []
-
-        for p in self.pages:
-            url = p.get("url", "")
-            if self._is_utility_path(url):
-                continue
-
-            cta = p.get("ctas", {})
-            total_ctas = cta.get("total_ctas", 0)
-            actionable = cta.get("actionable_ctas_count", 0)
-            generic = cta.get("generic_ctas_count", 0)
-
-            is_comm = self._is_commercial_path(url)
-
-            if is_comm and (total_ctas == 0 or actionable == 0):
-                commercial_missing_cta.append(url)
-
-            if generic >= 3 and generic > actionable:
-                generic_cta_dominated.append({"url": url, "count": generic, "samples": cta.get("generic_ctas_sample", [])})
-
-            if total_ctas > 8:
-                excessive_ctas.append(url)
-
-            if actionable > 0 and generic == 0:
-                clear_ctas.append(url)
-
-        if commercial_missing_cta:
-            self._add_finding(
-                severity="high",
-                title="No actionable call-to-action buttons on commercial/product page",
-                detail=(
-                    f"Commercial page(s) lack prominent actionable CTAs: {', '.join(commercial_missing_cta[:3])}. "
-                    "Visitors arriving from AI shopping or product queries have no immediate conversion path."
-                ),
-                affected_urls=commercial_missing_cta,
-                recommendation="Add distinct primary CTA buttons ('Start Free Trial', 'Request Demo', 'Buy Now') above the fold.",
-            )
-
-        if generic_cta_dominated:
-            urls = [p["url"] for p in generic_cta_dominated]
-            self._add_finding(
-                severity="medium",
-                title="Call-to-action buttons dominated by ambiguous generic copy ('Learn More')",
-                detail=(
-                    f"{len(generic_cta_dominated)} page(s) overuse generic CTA phrases: {', '.join(urls[:3])}. "
-                    "Repeated 'Learn More' buttons fail to communicate value and reduce conversion clarity."
-                ),
-                affected_urls=urls,
-                recommendation="Replace generic labels with specific verbs indicating the destination ('Read Pricing Guide', 'Explore Features').",
-            )
-
-        if excessive_ctas:
-            self._add_finding(
-                severity="low",
-                title="High density of competing action buttons may induce decision fatigue",
-                detail=f"{len(excessive_ctas)} page(s) contain > 8 distinct button triggers: {', '.join(excessive_ctas[:3])}.",
-                affected_urls=excessive_ctas,
-                recommendation="Establish a single prominent primary CTA per viewport, styling secondary actions subtly.",
-            )
-
-        if clear_ctas:
-            self._add_finding(
-                severity="info",
-                title="Actionable, distinct conversion paths detected",
-                detail="Pages feature action-oriented call-to-action wording with clear intent.",
-                affected_urls=clear_ctas[:4],
-                recommendation="Perform A/B testing on button colors and placement to continually refine conversion rates.",
-            )
-
-    def validate_eg06_search(self):
-        """EG-06: On-site search availability and discoverability."""
-        has_search_anywhere = any(p.get("search", {}).get("has_search", False) for p in self.pages)
-
-        # Only audit search if site has multiple pages (not a micro-page)
-        if len(self.pages) >= 3 and not has_search_anywhere:
-            self._add_finding(
-                severity="medium",
-                title="No discoverable on-site search functionality detected",
-                detail=(
-                    f"None of the {len(self.pages)} audited pages on {self.site_url} contain a search form or input. "
-                    "Visitors arriving via AI referrals who wish to explore related queries cannot search your catalog."
-                ),
-                affected_urls=[self.site_url],
-                recommendation="Embed a global search input in the header or navigation bar with autocomplete support.",
-            )
-        elif has_search_anywhere:
-            self._add_finding(
-                severity="info",
-                title="Discoverable on-site search input verified",
-                detail="Site search forms or search input controls are present in page navigation.",
-                affected_urls=[self.site_url],
-                recommendation="Ensure on-site search results provide snippet summaries and facet filters for content-heavy catalogs.",
-            )
-
-    def validate_eg07_context_retention(self):
-        """EG-07: Context retention and returning-visitor features."""
-        has_retention_anywhere = any(p.get("context_retention", {}).get("has_context_retention", False) for p in self.pages)
-
-        if not has_retention_anywhere:
-            self._add_finding(
-                severity="low",
-                title="No returning-visitor context retention or personalization features detected",
-                detail=(
-                    f"Site ({self.site_url}) shows no stateful continuity features (recently viewed items, wishlist/saved items, "
-                    "or account personalization). Returning visitors arriving from AI assistants find no prior browsing anchor."
-                ),
-                affected_urls=[self.site_url],
-                recommendation="Introduce client-side browsing history widgets ('Recently Viewed') or favoriting to anchor returning visitors.",
-            )
-        else:
-            self._add_finding(
-                severity="info",
-                title="Returning-visitor continuity anchors detected",
-                detail="Detected account/profile controls or client-side retention state hooks for returning visitors.",
-                affected_urls=[self.site_url],
-                recommendation="Leverage cookie/session context to greet returning visitors referred back by AI search assistants.",
-            )
-
-    def run_all(self) -> dict:
-        """Execute all checks, prioritize findings, and format report."""
-        self.validate_eg01_navigation()
-        self.validate_eg02_orientation()
-        self.validate_eg03_performance()
-        self.validate_eg04_mobile()
-        self.validate_eg05_ctas()
-        self.validate_eg06_search()
-        self.validate_eg07_context_retention()
-
-        # Sort findings by priority: critical -> high -> medium -> low -> info
-        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        self.findings.sort(key=lambda x: priority_order.get(x.get("severity", "info"), 99))
-
-        # Re-number finding IDs sequentially in priority order (eg-001, eg-002, ...)
-        for idx, f in enumerate(self.findings, 1):
-            f["finding_id"] = f"eg-{idx:03d}"
-
-        # Severity summary
-        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-        for f in self.findings:
-            sev = f.get("severity", "info")
-            if sev in by_severity:
-                by_severity[sev] += 1
-
-        return {
-            "site": self.site_url,
-            "skill": "engagement-audit",
-            "total_findings": len(self.findings),
-            "by_severity": by_severity,
-            "findings": self.findings,
-        }
+    def run_all(self) -> list[dict]:
+        """Run all checks and return only shared-contract findings with stable ``id``."""
+        self.findings = []
+        pages = self._content_pages()
+        if not pages:
+            return []
+        self.validate_eg01_navigation(pages)
+        self.validate_eg02_orientation(pages)
+        self.validate_eg03_performance(pages)
+        self.validate_eg04_mobile(pages)
+        self.validate_eg05_ctas(pages)
+        self.validate_eg06_search(pages)
+        self.validate_eg07_context(pages)
+        self.findings.sort(key=lambda f: (_PRIORITY.get(f.get("severity"), 99), f.get("id", "")))
+        return self.findings
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Validate on-site engagement, navigation, and UX metrics.")
-    parser.add_argument("--raw-data", help="Path to JSON output from engagement_extractor.py")
-    parser.add_argument("--url", help="Site URL (if running extraction inline)")
-    parser.add_argument("--pages", help="Comma-separated paths to audit if running inline")
-    parser.add_argument("--output", help="Optional output JSON file path")
+    parser = argparse.ArgumentParser(description="Validate engagement extractor JSON.")
+    parser.add_argument("--raw-data")
+    parser.add_argument("--url")
+    parser.add_argument("--pages", default="")
+    parser.add_argument("--max-pages", type=int, default=10)
+    parser.add_argument("--output")
     args = parser.parse_args()
-
-    raw_data = None
     if args.raw_data:
         try:
             with open(args.raw_data, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-        except Exception as e:
-            print(json.dumps({"error": f"Failed to read --raw-data file {args.raw_data}: {e}"}), file=sys.stderr)
-            sys.exit(1)
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"cannot read raw data: {exc}")
     elif args.url:
-        extractor_script = os.path.join(_SCRIPTS_DIR, "engagement_extractor.py")
-        cmd = [sys.executable, extractor_script, "--url", args.url]
-        if args.pages:
-            cmd.extend(["--pages", args.pages])
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(json.dumps({"error": f"Extractor failed: {proc.stderr}"}), file=sys.stderr)
-            sys.exit(1)
-        raw_data = json.loads(proc.stdout)
+        import requests
+        from engagement_extractor import build_raw
+        session = requests.Session()
+        session.headers.update({"User-Agent": _CONFIG.get("extraction", {}).get("user_agent", "BrandAIReadinessAudit/1.0")})
+        raw = build_raw(args.url, args.pages.split(",") if args.pages else [], session, args.max_pages)
     else:
-        print(json.dumps({"error": "Must supply either --raw-data or --url"}), file=sys.stderr)
-        sys.exit(1)
-
-    validator = EngagementValidator(raw_data)
-    report = validator.run_all()
-
-    output_str = json.dumps(report, indent=2)
+        parser.error("supply --raw-data or --url")
+    findings = EngagementValidator(raw).run_all()
+    report = {"site": raw.get("site", ""), "skill": SKILL, "total_findings": len(findings), "findings": findings}
+    output = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_str)
+            f.write(output)
     else:
-        print(output_str)
+        print(output)
 
 
 if __name__ == "__main__":

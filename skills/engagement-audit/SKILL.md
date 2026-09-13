@@ -6,10 +6,7 @@ description: >
   CTAs, and context retention — because a perfectly crawlable page can still
   bounce visitors if it disorients them on landing.
 license: MIT
-tools:
-  - run_command
-  - read_url_content
-  - view_file
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Engagement Audit
@@ -53,13 +50,13 @@ flagged as unreachable or blocked are skipped.
 
 | ID | Check | What to look for |
 |----|-------|------------------|
-| **EG-01** | **Navigational clarity** | Whether visitors can reach key destinations (about, pricing, contact, products/services) within 1–2 clicks from any landing page. Checks primary navbar consistency and detects critical destinations buried in footers or omitted entirely. |
-| **EG-02** | **Orientation cues** | Whether an arriving visitor immediately understands page context and hierarchy. Evaluates presence of single descriptive `<h1>`, above-the-fold value proposition (hero copy), and breadcrumbs on deep catalog/interior pages. |
-| **EG-03** | **Load performance red flags** | Structural bottlenecks that inflate First Contentful Paint (FCP) and Cumulative Layout Shift (CLS): render-blocking `<script>` tags in `<head>`, excessive external stylesheets, images missing dimensions or lazy-loading, and third-party domain sprawl (>10 domains). |
-| **EG-04** | **Mobile responsiveness** | Presence and configuration of `<meta name="viewport">` tag (`width=device-width, initial-scale=1.0`). Detects accessibility anti-patterns that disable pinch-to-zoom (`user-scalable=no`, `maximum-scale=1.0`). |
-| **EG-05** | **Calls-to-action clarity** | Discoverability and actionability of primary conversion paths. Flags absence of actionable CTAs on commercial/pricing pages, overuse of ambiguous generic labels ("Learn More" × 3+), and button overload inducing decision paralysis. |
-| **EG-06** | **On-site search** | Discoverability and accessibility of site search inputs on multi-page catalogs, blogs, or documentation suites. Checks for search form controls and accessible labels on icon triggers. |
-| **EG-07** | **Context retention / continuity** | Returning-visitor features: browsing history, recently viewed items, saved/wishlist state, account/profile continuity, and client-side retention hooks. |
+| **EG-01** | **Navigational clarity** | Presence and semantic labeling of primary navigation, consistency of navigation labels across sampled templates, and context-appropriate offering/support paths on pages with commercial evidence. It does not require pricing or commercial menus on news, documentation, or general sites. |
+| **EG-02** | **Orientation cues** | Non-empty `<h1>` cues, introductory copy near the start of landing pages, and breadcrumbs on deep hierarchical documentation/commercial pages. Editorial permalinks are excluded from breadcrumb expectations. |
+| **EG-03** | **Structural performance risks** | Measurable HTML architecture signals: synchronous external head scripts, stylesheet count, image dimension coverage, later-document image loading, and third-party host count. These are risks, not measured Core Web Vitals. |
+| **EG-04** | **Viewport and zoom** | Presence of viewport metadata, exact `width=device-width`, and zoom restrictions (`user-scalable=no/0` or `maximum-scale<2`). |
+| **EG-05** | **Calls-to-action clarity** | Missing controls only on pages classified as commercial, repeated generic labels only when they dominate non-editorial controls, and actionable CTA density. |
+| **EG-06** | **On-site search** | Search inputs, forms, landmarks, triggers, and icon-trigger accessible names. Absence is reported only with a ≥5-page sample or ≥3 documentation/editorial pages. |
+| **EG-07** | **Context retention / continuity** | Evidence of saved/history/account features and client storage hooks. Absence is reported only for a sampled stateful commercial journey, not news/docs/general sites. |
 
 ---
 
@@ -75,14 +72,20 @@ Run the bundled extractor script:
 python scripts/engagement_extractor.py --url <site_root_url> [--pages <paths>] [--max-pages 10] --output /tmp/engagement-raw.json
 ```
 
-From the JSON output, verify extraction of:
-- `navigation`: primary nav link counts and key destination coverage (about, pricing, contact, products).
-- `orientation`: `h1` count/text, hero value proposition length, and breadcrumb presence.
-- `performance`: render-blocking head scripts, external stylesheets, image dimensions, lazy loading, and third-party domain sprawl.
-- `mobile`: viewport meta tag content and zoom restriction flags.
-- `ctas`: total buttons, actionable verb count, and generic phrase counts.
-- `search`: search input controls, search forms, and icon discoverability.
-- `context_retention`: recently viewed, wishlist, saved items, and account anchors.
+The public extractor integration is:
+
+```python
+raw = engagement_extractor.build_raw(base_url, paths, session, max_pages)
+```
+
+`session` is requests-compatible and may be the orchestrator's shared cached safe session. The raw result records `successful_html_pages`, `skipped_pages`, and a per-page `html_success`/`fetch_status`. Only successful 2xx HTML responses that are non-empty and not probable block/interstitial pages contain extracted sections:
+- `navigation`: semantic/inferred primary navigation, labels, internal links, and destination evidence.
+- `orientation`: `h1` count/text, introductory text length, path depth, and visible/schema breadcrumbs.
+- `performance`: structural counts, ratios, and resource samples; no synthetic timing claim is made.
+- `mobile`: viewport content, device-width parsing, and zoom restrictions.
+- `ctas`: per-control classifications, distinct-action counts, generic-label ratios, and text evidence.
+- `search`: inputs, forms, landmarks, triggers, and accessible-name evidence.
+- `context_retention`: saved/history/account markers and client-storage hooks.
 
 ### Step 2 — Validate engagement signals and heuristics
 
@@ -92,16 +95,17 @@ Run the bundled validator script:
 python scripts/engagement_validator.py --raw-data /tmp/engagement-raw.json --output /tmp/engagement-findings.json
 ```
 
-The script evaluates checks **EG-01** through **EG-07** and outputs standardized findings.
+The script evaluates checks **EG-01** through **EG-07**. Programmatically, `EngagementValidator(raw).run_all()` returns a `list` of standardized shared-contract findings. The CLI wraps that list with site and count metadata.
 
 ### Step 3 — Apply false-positive suppression
 
 Before finalizing findings, verify suppression rules in `references/engagement-checks-detail.md`:
-- Do not flag missing navigation links or search forms on utility and checkout flows (`/login`, `/signup`, `/cart`, `/checkout`).
-- Do not flag CTA or context retention gaps on policy pages (`/privacy-policy`, `/terms`, `/legal`).
-- Do not require site search on minimalist microsites with ≤ 3 total pages.
-- Do not require breadcrumbs on shallow pages (path depth = 1).
-- Accept standard brand navigation aliases (e.g. "Docs" or "Documentation" fulfilling "Help/Support").
+- Skip every check when no successfully fetched HTML page is available; failed, blocked, empty, and non-HTML responses are coverage evidence only.
+- Suppress navigation, CTA, search, and continuity expectations on configured utility/legal/checkout paths.
+- Do not require commercial destinations such as pricing/about/contact. A context-appropriate offering or support route is checked only on commercial-profile pages.
+- Require site-search evidence only for a ≥5-page eligible sample or when all ≥3 sampled pages are documentation/editorial.
+- Require breadcrumbs only on deep hierarchical pages; suppress shallow pages and editorial permalinks.
+- Report absent continuity features only when at least two of three or more eligible pages have commercial evidence.
 
 ### Step 4 — Compile and return findings
 
@@ -114,10 +118,11 @@ and return the findings list to the audit orchestrator.
 ## Output (shared finding contract)
 
 Findings use the marketplace-wide contract defined in `lib/report.py` (see the root
-`README.md`). The executable compiler `scripts/engagement_analyzer.py` runs the core checks
-(mobile viewport, `<h1>` orientation, `<nav>` landmark, interior-page breadcrumbs, ambiguous
-CTA overload) over the fetched HTML and emits contract findings. Deeper checks (context
-retention, LCP, tap-target sizing, on-site search) are planned for a later pass.
+`README.md`). The complete executable path is `engagement_extractor.build_raw(...)` followed
+by `EngagementValidator(raw).run_all()`. `scripts/engagement_analyzer.py` is a compatibility
+adapter for callers that already hold `{url, html, status_code, content_type?}` records and
+runs the same seven checks. Findings contain only the shared stable `id`; no sequential
+`finding_id` is added.
 
 ```json
 {
@@ -146,10 +151,10 @@ retention, LCP, tap-target sizing, on-site search) are planned for a later pass.
 
 | Severity | Meaning | Examples |
 |----------|---------|----------|
-| **critical** | Key information unreachable within 2 clicks, or page is functionally broken on mobile. | Missing `<meta name="viewport">` tag rendering microscopic text on phones; core commercial destinations (`/pricing`, `/products`) completely omitted from navigation. |
-| **high** | No orientation cues on landing pages, accessibility violations, or missing primary CTA. | Landing page lacks an `<h1>` or visible above-the-fold value proposition; commercial page has zero CTA buttons; viewport restricts zoom (`user-scalable=no`). |
-| **medium** | Load performance concerns, missing breadcrumbs, generic CTAs, or missing search. | > 3 render-blocking `<script>` tags in `<head>`; images missing `width`/`height` (CLS risk); deep pages lack breadcrumbs; CTAs dominated by "Learn More" × 3+; no site search on content catalog. |
-| **low** | Minor UX issues or hygiene gaps. | Offscreen images lack `loading="lazy"`; search trigger icon lacks accessible `aria-label`; no returning-visitor context retention widgets. |
-| **info** | Observation or positive verification signal. | Responsive viewport properly configured; clear single `<h1>` with descriptive hero copy; distinct actionable conversion paths detected. |
+| **critical** | Successful HTML is functionally unsuitable for typical mobile layout. | Missing non-empty viewport metadata. |
+| **high** | A strong accessibility or conversion blocker with page-type evidence. | Device width omitted, zoom restricted, or a commercial-profile page has no measurable action control. |
+| **medium** | Repeated orientation/navigation gaps or thresholded structural risks. | Missing H1; >3 synchronous external head scripts; ≥50% and ≥2 images missing dimensions; content-rich sampled site has no search. |
+| **low** | Secondary semantic, hierarchy, CTA, loading, or continuity risk. | Missing nav landmark, deep hierarchical breadcrumb gap, generic CTAs dominate, later images load eagerly, eligible commercial sample lacks continuity features. |
+| **info** | Not emitted by the current validator. | Positive measurements remain available in raw extraction data. |
 
 See `references/engagement-checks-detail.md` for the full severity decision tree and override rules.

@@ -69,11 +69,13 @@ scratch/
 tmp/
 *.log
 local_test_output/
+qa-results/
 out/
 output/
 *.zip
 *.tar.gz
 Adobe_hackathon_context.md
+*.pdf
 
 # Generated audit output (run_audit.py writes these; regenerate, don't commit)
 report.json

@@ -1,6 +1,6 @@
 {
-  "_description": "Shared configuration for engagement-audit scripts. Single source of truth for tunable thresholds, navigation selectors, orientation rules, performance red flags, mobile criteria, CTA classifications, search discovery, and context retention hooks. All scripts load this file at startup.",
-  "_last_updated": "2026-09-08",
+  "_description": "Shared configuration for engagement extraction and validation. Thresholds are applied only to successfully fetched HTML pages; page-type and sample-size suppression is implemented in EngagementValidator.",
+    "_last_updated": "2026-09-13",
 
   "extraction": {
     "default_max_pages": 10,

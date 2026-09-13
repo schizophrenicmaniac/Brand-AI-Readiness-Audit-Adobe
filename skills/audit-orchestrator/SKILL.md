@@ -6,6 +6,7 @@ description: >
   freshness-corroboration, engagement) over one safe, cached fetch pass, and emits a
   single schema-valid report (JSON + Markdown) with evidence-backed, prioritized findings.
 license: MIT
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Audit Orchestrator

@@ -226,13 +226,15 @@ def extract_date_signals(resp: requests.Response, soup: BeautifulSoup, entities:
     return signals
 
 
-def extract_staleness_markers(soup: BeautifulSoup, page_url: str, session: requests.Session, check_dead_links: bool = True) -> dict:
+def extract_staleness_markers(soup: BeautifulSoup, page_url: str, session: requests.Session,
+                              check_dead_links: bool = True, dead_link_budget: dict = None) -> dict:
     """Scan visible text for outdated pricing, future-tense past events, stale copyright, and dead links."""
     markers = {
         "outdated_pricing_keywords": [],
         "future_past_conflicts": [],
         "stale_copyright": None,
         "dead_outbound_links": [],
+        "unverified_outbound_links": [],
     }
 
     body = soup.find("body")
@@ -284,8 +286,14 @@ def extract_staleness_markers(soup: BeautifulSoup, page_url: str, session: reque
                 break
 
         for link in outbound_links:
+            # A shared mutable budget caps checks across the entire site and also avoids
+            # rechecking the same external URL on every audited page.
+            if dead_link_budget is not None:
+                if dead_link_budget.get("remaining", 0) <= 0 or link in dead_link_budget.setdefault("seen", set()):
+                    continue
+                dead_link_budget["remaining"] -= 1
+                dead_link_budget["seen"].add(link)
             try:
-                # Use HEAD with fallback to GET stream to check link health quickly
                 head_resp = session.head(link, timeout=timeout, allow_redirects=True)
                 if head_resp.status_code in (404, 410):
                     markers["dead_outbound_links"].append({
@@ -293,17 +301,23 @@ def extract_staleness_markers(soup: BeautifulSoup, page_url: str, session: reque
                         "status_code": head_resp.status_code,
                         "error": "HTTP status indicates page removed/not found"
                     })
-                elif head_resp.status_code >= 500:
-                    markers["dead_outbound_links"].append({
+                elif head_resp.status_code == 429 or head_resp.status_code >= 500:
+                    markers["unverified_outbound_links"].append({
                         "url": link,
                         "status_code": head_resp.status_code,
-                        "error": "Server error on external link"
+                        "reason": "Transient/rate-limited response; link health unverified"
                     })
-            except requests.exceptions.RequestException as req_err:
-                markers["dead_outbound_links"].append({
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as req_err:
+                markers["unverified_outbound_links"].append({
                     "url": link,
                     "status_code": 0,
-                    "error": str(req_err)
+                    "reason": f"Network failure; link health unverified: {req_err}"
+                })
+            except requests.exceptions.RequestException as req_err:
+                markers["unverified_outbound_links"].append({
+                    "url": link,
+                    "status_code": 0,
+                    "reason": f"Request failed; link health unverified: {req_err}"
                 })
 
     return markers
@@ -344,15 +358,17 @@ def extract_entity_data(soup: BeautifulSoup, entities: list, base_url: str) -> d
         else:
             brand_candidates.append(t)
 
-    # Extract from JSON-LD entities
+    # Extract from JSON-LD entities. Collect all identity candidates first: flattened
+    # JSON-LD often exposes a minimal nested Article.publisher Organization before the
+    # complete top-level organization, so first-match selection is not reliable.
+    identity_types = {"Organization", "NewsMediaOrganization", "Corporation", "LocalBusiness", "WebSite"}
+    identity_entities = []
     for ent in entities:
         etype = ent.get("@type", "")
         types = [etype] if isinstance(etype, str) else (etype if isinstance(etype, list) else [])
 
-        if any(t in ("Organization", "Corporation", "LocalBusiness", "WebSite") for t in types):
-            if ent.get("name") and not entity_data["brand_name"]:
-                entity_data["brand_name"] = ent["name"].strip()
-
+        if identity_types.intersection(types):
+            identity_entities.append(ent)
             same_as = ent.get("sameAs", [])
             if isinstance(same_as, str):
                 entity_data["sameAs"].append(same_as)
@@ -387,6 +403,29 @@ def extract_entity_data(soup: BeautifulSoup, entities: list, base_url: str) -> d
             offers = ent.get("offers")
             if isinstance(offers, dict) and offers.get("price"):
                 entity_data["claims"]["pricing_sample"].append(f"{offers.get('price')} {offers.get('priceCurrency', 'USD')}")
+
+    def identity_score(ent):
+        types = set(ent.get("@type", []) if isinstance(ent.get("@type"), list) else [ent.get("@type")])
+        specificity = max(
+            [score for name, score in {
+                "NewsMediaOrganization": 50, "Corporation": 45,
+                "LocalBusiness": 45, "Organization": 30, "WebSite": 15,
+            }.items() if name in types] or [0]
+        )
+        completeness = sum(
+            weight for prop, weight in {
+                "name": 8, "url": 8, "sameAs": 10, "logo": 3,
+                "description": 2, "contactPoint": 2, "address": 2,
+            }.items() if ent.get(prop)
+        )
+        meaningful = {k for k, v in ent.items() if k not in ("@type", "@context") and v not in (None, "", [], {})}
+        minimal_penalty = 18 if meaningful.issubset({"@id", "name"}) else 0
+        return specificity + completeness - minimal_penalty
+
+    named_identity_entities = [ent for ent in identity_entities if isinstance(ent.get("name"), str) and ent.get("name").strip()]
+    if named_identity_entities:
+        primary_identity = max(named_identity_entities, key=identity_score)
+        entity_data["brand_name"] = primary_identity["name"].strip()
 
     # Fallback brand name if JSON-LD had none
     if not entity_data["brand_name"] and brand_candidates:
@@ -426,6 +465,30 @@ def _normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _name_variants_match(query: str, candidate: str, aliases=None) -> bool:
+    """Conservative alias match: normalized equality, optional leading 'the', or an
+    exact normalized alias. This accepts redirect/alias titles without substring
+    matching short brands into unrelated entities."""
+    query_norm = _normalize_name(query)
+    variants = [_normalize_name(candidate)] + [_normalize_name(a) for a in (aliases or [])]
+    variants = {v for v in variants if v}
+    if query_norm in variants:
+        return True
+    without_the = lambda value: re.sub(r"^the\s+", "", value).strip()
+    return bool(query_norm and any(without_the(query_norm) == without_the(v) for v in variants))
+
+
+def _looks_like_organization(text: str) -> bool:
+    clean = re.sub(r"<[^>]+>", " ", text or "").lower()
+    positive = (
+        "company", "corporation", "organisation", "organization", "business",
+        "publisher", "newspaper", "news agency", "media", "brand", "enterprise",
+        "software", "manufacturer", "nonprofit", "non-profit", "institution",
+        "conglomerate", "retailer", "airline", "bank", "university", "foundation",
+    )
+    return any(term in clean for term in positive) and "disambiguation page" not in clean
+
+
 def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requests.Session) -> dict:
     """Check entity presence on Wikipedia and Wikidata via public APIs and sameAs links."""
     endpoints = _CONFIG.get("grounding_endpoints", {})
@@ -461,28 +524,56 @@ def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requ
             if qid_match:
                 result["wikidata"]["qid"] = qid_match.group(0)
 
-    # 2. Query Wikipedia Search API if not already verified
+    # 2. Resolve the supplied name as a Wikipedia title first. `redirects=1`
+    # catches former names and aliases deterministically; intro context prevents an
+    # obvious homonym (for example a fruit sharing a company name) from grounding it.
     if not result["wikipedia"]["has_entry"] and brand_name:
         try:
             params = {
-                "action": "query",
-                "list": "search",
-                "srsearch": brand_name,
-                "utf8": "1",
+                "action": "query", "titles": brand_name, "redirects": "1",
+                "prop": "extracts", "exintro": "1", "explaintext": "1",
                 "format": "json",
-                "srlimit": 3,
             }
             resp = session.get(wiki_api, params=params, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
-                search_results = data.get("query", {}).get("search", [])
+                redirects = data.get("query", {}).get("redirects", [])
+                redirect_aliases = [r.get("from", "") for r in redirects]
+                for page in data.get("query", {}).get("pages", {}).values():
+                    title = page.get("title", "")
+                    extract = page.get("extract", "")
+                    if "missing" not in page and _name_variants_match(brand_name, title, redirect_aliases) and _looks_like_organization(extract):
+                        result["wikipedia"].update({
+                            "has_entry": True,
+                            "title": title,
+                            "url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                            "snippet": extract[:300],
+                        })
+                        break
+        except Exception:
+            pass
+
+    # Search remains a fallback for parenthetical/corporate titles not represented by
+    # a redirect. Matching stays conservative and requires organization context.
+    if not result["wikipedia"]["has_entry"] and brand_name:
+        try:
+            params = {
+                "action": "query", "list": "search", "srsearch": brand_name,
+                "utf8": "1", "format": "json", "srlimit": 5,
+            }
+            resp = session.get(wiki_api, params=params, timeout=timeout)
+            if resp.status_code == 200:
+                search_results = resp.json().get("query", {}).get("search", [])
                 for item in search_results:
                     title = item.get("title", "")
-                    if _normalize_name(title) == _normalize_name(brand_name):
-                        result["wikipedia"]["has_entry"] = True
-                        result["wikipedia"]["title"] = title
-                        result["wikipedia"]["url"] = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                        result["wikipedia"]["snippet"] = item.get("snippet", "")
+                    snippet = item.get("snippet", "")
+                    if _name_variants_match(brand_name, title) and _looks_like_organization(snippet):
+                        result["wikipedia"].update({
+                            "has_entry": True,
+                            "title": title,
+                            "url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                            "snippet": snippet,
+                        })
                         break
         except Exception:
             pass
@@ -503,7 +594,9 @@ def check_wikipedia_wikidata(brand_name: str, same_as_links: list, session: requ
                 search_results = data.get("search", [])
                 for item in search_results:
                     label = item.get("label", "")
-                    if _normalize_name(label) == _normalize_name(brand_name):
+                    aliases = item.get("aliases", [])
+                    description = item.get("description", "")
+                    if _name_variants_match(brand_name, label, aliases) and _looks_like_organization(description):
                         result["wikidata"]["has_entry"] = True
                         result["wikidata"]["qid"] = item.get("id")
                         result["wikidata"]["description"] = item.get("description", "")
@@ -570,7 +663,8 @@ def generate_corroboration_templates(brand_name: str, claims: dict) -> list:
     return templates
 
 
-def analyze_page(url: str, session: requests.Session, check_dead_links: bool = True) -> dict:
+def analyze_page(url: str, session: requests.Session, check_dead_links: bool = True,
+                 dead_link_budget: dict = None) -> dict:
     """Fetch and extract date signals, staleness markers, and entities from a single page."""
     try:
         resp = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=True)
@@ -589,7 +683,9 @@ def analyze_page(url: str, session: requests.Session, check_dead_links: bool = T
 
     entities = extract_json_ld_entities(soup)
     date_signals = extract_date_signals(resp, soup, entities)
-    staleness = extract_staleness_markers(soup, resp.url, session, check_dead_links=check_dead_links)
+    staleness = extract_staleness_markers(
+        soup, resp.url, session, check_dead_links=check_dead_links,
+        dead_link_budget=dead_link_budget)
     entity_data = extract_entity_data(soup, entities, resp.url)
 
     return {
@@ -629,8 +725,16 @@ def build_raw(base_url: str, paths, session: requests.Session,
         "flagship_products": [], "pricing_sample": [],
     }
 
+    dead_link_cfg = _CONFIG.get("staleness_signals", {}).get("dead_link_check", {})
+    dead_link_budget = {
+        "remaining": dead_link_cfg.get("max_links_sitewide", 8),
+        "seen": set(),
+    }
+
     for u in urls_to_check:
-        page_res = analyze_page(u, session, check_dead_links=check_dead_links)
+        page_res = analyze_page(
+            u, session, check_dead_links=check_dead_links,
+            dead_link_budget=dead_link_budget)
         pages_output.append(page_res)
 
         ed = page_res.get("entity_data", {})

@@ -103,11 +103,26 @@ def _choose_pages(home, sitemap_page_urls, robots_groups, max_pages):
             continue
         seen.add(n)
         candidates.append(u)
-    candidates.sort(key=lambda u: (score(u), u))
+    def date_rank(u):
+        match = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})(?:/|$)", urlparse(u).path)
+        return -int("".join(part.zfill(2) for part in match.groups())) if match else 0
 
-    chosen = [home]
-    skipped_auth, skipped_robots = [], []
+    candidates.sort(key=lambda u: (score(u), date_rank(u), u))
+
+    # Prefer template diversity before filling remaining slots. This prevents a large
+    # archive sitemap from yielding eight near-identical pages from one section.
+    diverse, remainder, seen_sections = [], [], set()
     for u in candidates:
+        section = next((p for p in urlparse(u).path.split("/") if p), "root")
+        if section not in seen_sections:
+            seen_sections.add(section)
+            diverse.append(u)
+        else:
+            remainder.append(u)
+
+    chosen = []
+    skipped_auth, skipped_robots = [], []
+    for u in [home] + diverse + remainder:
         if len(chosen) >= max_pages:
             break
         if _is_auth_path(u):
@@ -164,9 +179,10 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
     import html_fetcher
     import render_analyzer
     import crawl_analyzer
-    import engagement_analyzer
+    import engagement_extractor
     import structured_data_extractor
     import freshness_extractor
+    from engagement_validator import EngagementValidator
     from schema_validator import SchemaValidator
     from freshness_validator import FreshnessValidator
 
@@ -183,6 +199,21 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
     except Exception as e:
         coverage["errors"].append(f"robots: {str(e)[:200]}")
 
+    robots_status = robots.get("status")
+    if robots_status is None or (isinstance(robots_status, int) and robots_status >= 500):
+        coverage["robots_policy_status"] = "unavailable-fail-closed"
+        coverage["incomplete"] = [
+            "crawl-access-audit", "render-extraction-audit", "structured-data-audit",
+            "freshness-corroboration-audit", "engagement-audit",
+        ]
+        coverage["errors"].append(
+            "robots.txt could not be reliably retrieved; no site pages were fetched"
+        )
+        safe_http.uninstall()
+        return assemble_report(site_host, [], coverage=coverage, pages_audited=0,
+                               proactive_improvements=[])
+
+    coverage["robots_policy_status"] = "enforced" if robots_status == 200 else "unavailable-allow-per-rfc9309"
     try:
         sitemap = sitemap_validator.analyze(home, robots.get("sitemap_urls") or None)
     except DeadlineExceeded:
@@ -213,6 +244,13 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
         return crawl_analyzer.compile_findings(robots, sitemap, pages_raw)
     findings += _run_skill("crawl-access-audit", _crawl, coverage)
 
+    successful_urls = {
+        p.get("url") for p in pages_raw.get("pages", [])
+        if p.get("status_code") == 200 and p.get("url")
+    }
+    reachable = [u for u in chosen if u in successful_urls]
+    coverage["pages_successfully_fetched"] = reachable
+
     # Coverage fallback: when the site has no usable sitemap, page selection above yields
     # only the homepage. Reuse the internal links the crawl graph already discovered so the
     # content skills (render/structured/freshness/engagement) audit real interior pages too,
@@ -226,21 +264,50 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
             coverage["skipped_auth_action"] = sorted(set(skipped_auth + extra_auth))
             coverage["skipped_by_robots"] = sorted(set(skipped_robots + extra_robots))
             coverage["interior_from_crawl_graph"] = bool(interior)
+            # The first crawl established the fallback candidates, but it only fetched
+            # the homepage. Fetch the selected candidates before invoking the content
+            # skills; otherwise a sitemap-less site would misleadingly report
+            # homepage-only coverage while claiming that interior pages were selected.
+            # SafeSession's cache avoids fetching the homepage twice.
+            pages_raw = page_fetcher.analyze(
+                home, page_paths=chosen, max_pages=min(max_pages, 8), max_depth=2,
+                sitemap_urls=(sitemap or {}).get("page_urls"))
+            successful_urls = {
+                p.get("url") for p in pages_raw.get("pages", [])
+                if p.get("status_code") == 200 and p.get("url")
+            }
+            reachable = [u for u in chosen if u in successful_urls]
+            coverage["pages_successfully_fetched"] = reachable
+
+    content_pages = reachable
+    content_interior = content_pages[1:] if content_pages and content_pages[0] == home else [
+        u for u in content_pages if u != home
+    ]
+    content_skill_names = [
+        "render-extraction-audit", "structured-data-audit",
+        "freshness-corroboration-audit", "engagement-audit",
+    ]
+    if not content_pages:
+        coverage["not_assessable"] = {
+            name: "no successfully fetched HTML pages" for name in content_skill_names
+        }
+        coverage["incomplete"].extend(content_skill_names)
 
     # --- render-extraction (static; browser if Playwright present) ----------
     def _render():
-        raw_html = html_fetcher.analyze(home, page_paths=chosen, max_pages=max_pages)
+        raw_html = html_fetcher.analyze(home, page_paths=content_pages, max_pages=max_pages)
         rendered = None
         try:
             import playwright  # noqa: F401 - probe for playwright before importing extractor
             import rendered_dom_extractor
-            rendered = rendered_dom_extractor.analyze(home, page_paths=chosen,
+            rendered = rendered_dom_extractor.analyze(home, page_paths=content_pages,
                                                       max_pages=max_pages, raw_data=raw_html)
             coverage["render_available"] = True
         except (ImportError, SystemExit, Exception):
             rendered = None       # Playwright not installed -> degrade cleanly to static-only
         return render_analyzer.compile_findings(raw_html, rendered)
-    findings += _run_skill("render-extraction-audit", _render, coverage)
+    if content_pages:
+        findings += _run_skill("render-extraction-audit", _render, coverage)
 
     # --- structured-data ----------------------------------------------------
     import requests  # patched to SafeSession by install()
@@ -248,31 +315,36 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
     def _structured():
         session = requests.Session()
         session.headers.update({"User-Agent": UA})
-        raw = structured_data_extractor.build_raw(home, interior, session, max_pages)
+        raw = structured_data_extractor.build_raw(home, content_interior, session, max_pages)
         if raw.get("llms_txt", {}).get("/llms.txt", {}).get("present"):
             coverage["discovery_resources"]["llms_txt"] = raw["llms_txt"]["/llms.txt"].get("url")
         return SchemaValidator(raw).run_all()
-    findings += _run_skill("structured-data-audit", _structured, coverage)
+    if content_pages:
+        findings += _run_skill("structured-data-audit", _structured, coverage)
 
     # --- freshness-corroboration -------------------------------------------
     def _freshness():
         session = requests.Session()
         session.headers.update({"User-Agent": UA})
-        raw = freshness_extractor.build_raw(home, interior, session, max_pages, check_dead_links=True)
+        raw = freshness_extractor.build_raw(home, content_interior, session, max_pages, check_dead_links=True)
         return FreshnessValidator(raw).run_all()
-    findings += _run_skill("freshness-corroboration-audit", _freshness, coverage)
+    if content_pages:
+        findings += _run_skill("freshness-corroboration-audit", _freshness, coverage)
 
     # --- engagement ---------------------------------------------------------
     def _engagement():
-        pages = engagement_analyzer._fetch_pages(home, [urlparse(u).path for u in interior])
-        return engagement_analyzer.compile_findings(pages)
-    findings += _run_skill("engagement-audit", _engagement, coverage)
+        session = requests.Session()
+        session.headers.update({"User-Agent": UA})
+        raw = engagement_extractor.build_raw(home, content_interior, session, max_pages)
+        return EngagementValidator(raw).run_all()
+    if content_pages:
+        findings += _run_skill("engagement-audit", _engagement, coverage)
 
     safe_http.uninstall()
 
     report = assemble_report(
         site_host, findings, coverage=coverage,
-        pages_audited=len(chosen),
+        pages_audited=len(content_pages),
         proactive_improvements=_proactive(findings))
     return report
 

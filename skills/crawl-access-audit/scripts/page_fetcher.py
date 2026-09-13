@@ -203,9 +203,11 @@ def check_tls(hostname: str, port: int = 443) -> dict:
 def detect_challenge_page(body: str, headers: dict, status_code: int) -> dict:
     """Detect if a response is a bot-challenge or CAPTCHA page."""
     body_lower = body.lower() if body else ""
+    normalized_headers = {str(name).lower(): str(value) for name, value in headers.items()}
     title_match = re.search(r"<title[^>]*>(.*?)</title>", body_lower, re.DOTALL)
     title_text = title_match.group(1).strip() if title_match else ""
     infrastructure_signals = []
+    provider_infrastructure = defaultdict(list)
 
     for provider, sigs in CHALLENGE_SIGNATURES.items():
         # Check title patterns
@@ -226,12 +228,26 @@ def detect_challenge_page(body: str, headers: dict, status_code: int) -> dict:
                 }
         # Check header patterns
         for header_name, header_val in sigs["header_patterns"].items():
-            actual = headers.get(header_name, headers.get(header_name.lower(), ""))
+            actual = normalized_headers.get(header_name.lower(), "")
             if actual:
                 if header_val is None:
-                    infrastructure_signals.append(f"{provider}: header '{header_name}' present")
+                    signal = f"{provider}: header '{header_name}' present"
+                    infrastructure_signals.append(signal)
+                    provider_infrastructure[provider].append(signal)
                 elif header_val.lower() in actual.lower():
-                    infrastructure_signals.append(f"{provider}: header '{header_name}' contains '{header_val}'")
+                    signal = f"{provider}: header '{header_name}' contains '{header_val}'"
+                    infrastructure_signals.append(signal)
+                    provider_infrastructure[provider].append(signal)
+
+    # Cloudflare commonly returns a terse 403 whose only reliable attribution is
+    # the delivery/WAF headers. Those headers are not a challenge signal on a healthy
+    # response, but together with 403 they are evidence of a Cloudflare access denial.
+    if status_code == 403 and provider_infrastructure.get("cloudflare"):
+        return {
+            "detected": True,
+            "provider": "cloudflare",
+            "signal": "HTTP 403 with " + "; ".join(provider_infrastructure["cloudflare"]),
+        }
 
     # JS-redirect-only check
     if body and len(body) < _JS_REDIRECT_MAX_BODY_CHARS:
@@ -386,8 +402,14 @@ def fetch_page(url: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
         hsts = final_resp.headers.get("Strict-Transport-Security")
         result["hsts_header"] = hsts
 
+        # Challenge and WAF-denial pages frequently use 403 rather than 200, so
+        # inspect every terminal response before limiting HTML metadata checks to 200.
+        body = final_resp.text
+        result["challenge_page"] = detect_challenge_page(
+            body, dict(final_resp.headers), final_resp.status_code
+        )
+
         if final_resp.status_code == 200:
-            body = final_resp.text
 
             # Parse HTML for meta, canonical, title, links
             parser = PageMetaParser(current_url)
@@ -424,11 +446,6 @@ def fetch_page(url: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
             soft_404 = detect_soft_404(final_resp.status_code, body, parser.title)
             result["is_soft_404"] = soft_404["detected"]
             result["soft_404_rule"] = soft_404.get("rule")
-
-            # Challenge page detection
-            result["challenge_page"] = detect_challenge_page(
-                body, dict(final_resp.headers), final_resp.status_code
-            )
 
     except requests.exceptions.Timeout:
         result["error"] = f"Timeout (>{timeout}s)"
@@ -607,7 +624,7 @@ def analyze(url: str, page_paths: list = None,
             "count": len(orphans),
             "urls": orphans[:50],
             "confidence": "bounded_crawl" if bounded else "high",
-            "note": "Potential orphans: navigation generated only after rendering is evaluated by render-extraction-audit.",
+            "note": "Candidates not observed in this bounded HTML-link crawl; this does not prove orphan status. Verify rendered and broader navigation before recommending link changes.",
         }
 
     return result

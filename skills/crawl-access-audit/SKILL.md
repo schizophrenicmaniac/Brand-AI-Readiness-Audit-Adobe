@@ -11,6 +11,7 @@ description: >
   "step 1 gate" from Appendix A — if the crawler cannot
   get in, nothing downstream matters for that page.
 license: MIT
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Crawl-Access Audit

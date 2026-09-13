@@ -11,6 +11,14 @@
       "ai_impact": "Grounds brand name, canonical homepage URL, brand logo, and authoritative cross-platform profiles (sameAs) for AI citation.",
       "missing_on_homepage_severity": "high"
     },
+    "NewsMediaOrganization": {
+      "category": "entity_identity",
+      "applicable_pages": ["homepage", "about", "contact", "news"],
+      "required_properties": ["name", "url"],
+      "recommended_properties": ["logo", "description", "sameAs", "contactPoint", "address", "ethicsPolicy", "masthead"],
+      "ai_impact": "Grounds a news publisher's canonical identity, ownership, policies, and authoritative profiles for article attribution.",
+      "missing_on_homepage_severity": "high"
+    },
     "WebSite": {
       "category": "entity_identity",
       "applicable_pages": ["homepage"],
@@ -65,6 +73,23 @@
       "required_properties": ["headline", "datePublished", "author", "publisher"],
       "recommended_properties": ["image", "dateModified", "dateline"],
       "ai_impact": "Critical for real-time and current event synthesis by AI models.",
+      "missing_on_homepage_severity": "low"
+    },
+    "SpeakableSpecification": {
+      "category": "content_accessibility",
+      "applicable_pages": ["article", "news"],
+      "required_any_properties": ["cssSelector", "xpath"],
+      "recommended_properties": [],
+      "ai_impact": "Identifies concise page sections suitable for voice playback and spoken answers.",
+      "missing_on_homepage_severity": "low"
+    },
+    "AggregateRating": {
+      "category": "commercial",
+      "applicable_pages": ["product", "item", "shop", "ecommerce"],
+      "required_properties": ["ratingValue"],
+      "required_any_properties": ["ratingCount", "reviewCount"],
+      "recommended_properties": ["bestRating", "worstRating"],
+      "ai_impact": "Provides bounded, count-backed reputation evidence for product recommendations.",
       "missing_on_homepage_severity": "low"
     },
     "FAQPage": {

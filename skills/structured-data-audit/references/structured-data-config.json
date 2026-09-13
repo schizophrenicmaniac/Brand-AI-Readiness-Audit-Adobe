@@ -20,7 +20,8 @@
       "Organization",
       "WebSite",
       "LocalBusiness",
-      "Corporation"
+      "Corporation",
+      "NewsMediaOrganization"
     ]
   },
 
@@ -122,6 +123,23 @@
       "# ",
       "> ",
       "## "
+    ]
+  },
+
+  "commerce": {
+    "valid_availability_values": [
+      "BackOrder",
+      "Discontinued",
+      "InStock",
+      "InStoreOnly",
+      "LimitedAvailability",
+      "MadeToOrder",
+      "OnlineOnly",
+      "OutOfStock",
+      "PreOrder",
+      "PreSale",
+      "Reserved",
+      "SoldOut"
     ]
   },
 

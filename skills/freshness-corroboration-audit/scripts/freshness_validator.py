@@ -116,6 +116,24 @@ class FreshnessValidator:
                 return True
         return False
 
+    def _is_archived_editorial(self, url: str, age_months=None) -> bool:
+        """Identify historical news/blog content where age is expected, not neglect."""
+        path = urlparse(url).path.lower()
+        patterns = _CONFIG.get("suppression", {}).get("archived_editorial_path_patterns", ["/blog/", "/news/"])
+        is_editorial = any(pattern in path for pattern in patterns)
+        year_match = re.search(r"/(19\d{2}|20\d{2})(?:/|$)", path)
+        old_url_year = bool(year_match and int(year_match.group(1)) <= datetime.now().year - 2)
+        threshold = _CONFIG.get("suppression", {}).get("archived_editorial_age_months", 24)
+        return is_editorial and (old_url_year or (age_months is not None and age_months >= threshold))
+
+    def _page_is_archived_editorial(self, page: dict) -> bool:
+        freshest = page.get("date_signals", {}).get("freshest_date") or {}
+        timestamp = freshest.get("timestamp")
+        age_months = None
+        if timestamp is not None:
+            age_months = (datetime.now().timestamp() - timestamp) / (30.44 * 86400)
+        return self._is_archived_editorial(page.get("url", ""), age_months)
+
     def _is_commercial_path(self, url: str) -> bool:
         """Check if URL is a commercial / pricing / product page."""
         lower = url.lower()
@@ -129,6 +147,7 @@ class FreshnessValidator:
 
         pages_missing_dates = []
         pages_stale_dates = []
+        archived_editorial_dates = []
         pages_critical_pricing_dates = []
         pages_with_fresh_dates = []
 
@@ -152,7 +171,9 @@ class FreshnessValidator:
                 missing_last_modified_header.append(url)
 
             if not has_date:
-                if not is_evergreen:
+                # A dated archive path (for example /news/2021/...) is intentionally
+                # historical; absence of update metadata is not an active freshness gap.
+                if not is_evergreen and not self._is_archived_editorial(url):
                     pages_missing_dates.append({"url": url, "is_commercial": is_comm})
             elif freshest and "timestamp" in freshest:
                 age_seconds = now_ts - freshest["timestamp"]
@@ -166,12 +187,16 @@ class FreshnessValidator:
                     })
                 elif age_months >= stale_threshold_months:
                     if not is_evergreen:
-                        pages_stale_dates.append({
+                        stale_record = {
                             "url": url,
                             "age_months": int(age_months),
                             "raw_date": freshest.get("raw"),
                             "is_commercial": is_comm,
-                        })
+                        }
+                        if self._is_archived_editorial(url, age_months):
+                            archived_editorial_dates.append(stale_record)
+                        else:
+                            pages_stale_dates.append(stale_record)
                 elif age_months <= 1:
                     # Only claim a page is "freshly updated" when the recent date comes from a
                     # real content signal (meta/schema/visible text). An HTTP Last-Modified/Date
@@ -244,6 +269,20 @@ class FreshnessValidator:
                 recommendation="Review and re-verify page claims, then refresh dateModified timestamps upon content review.",
             )
 
+        if archived_editorial_dates:
+            urls = [p["url"] for p in archived_editorial_dates]
+            self._add_finding(
+                check_id="FC-01-archived-editorial",
+                severity="info",
+                title="Historical editorial archive dates detected",
+                detail=(
+                    f"Detected {len(urls)} news/blog page(s) older than the archival threshold. "
+                    "Their publication age is expected and is not treated as an active-content freshness defect."
+                ),
+                affected_urls=urls,
+                recommendation="Preserve original publication dates; use dateModified only when archived content is substantively corrected.",
+            )
+
         # Low finding: Missing Last-Modified HTTP header
         if content_pages and len(missing_last_modified_header) == len(content_pages):
             self._add_finding(
@@ -275,15 +314,16 @@ class FreshnessValidator:
                 continue
 
             markers = page.get("staleness_markers", {})
+            is_archive = self._page_is_archived_editorial(page)
 
             # Outdated pricing keywords (e.g. "2022 pricing")
             outdated_kw = markers.get("outdated_pricing_keywords", [])
             if outdated_kw:
                 is_comm = self._is_commercial_path(url)
-                sev = "critical" if is_comm else "high"
+                sev = "low" if is_archive else ("critical" if is_comm else "high")
                 self._add_finding(
                     severity=sev,
-                    title="Outdated pricing year keywords detected in copy",
+                    title=("Historical pricing references detected in archived editorial copy" if is_archive else "Outdated pricing year keywords detected in copy"),
                     detail=(
                         f"Page copy on {url} contains historical pricing phrasing: {', '.join(outdated_kw)}. "
                         "AI models quoting this page will identify prices as dated or inaccurate."
@@ -296,8 +336,8 @@ class FreshnessValidator:
             future_past = markers.get("future_past_conflicts", [])
             if future_past:
                 self._add_finding(
-                    severity="high",
-                    title="Past calendar events described with future-tense language",
+                    severity="low" if is_archive else "high",
+                    title=("Historical future-tense event copy retained in archive" if is_archive else "Past calendar events described with future-tense language"),
                     detail=(
                         f"Page copy on {url} references historical years using future-tense phrasing: {', '.join(future_past)}. "
                         "Indicates unmaintained copy that degrades AI confidence scoring."
@@ -310,7 +350,7 @@ class FreshnessValidator:
             stale_cr = markers.get("stale_copyright")
             if stale_cr:
                 years_behind = stale_cr.get("years_behind", 1)
-                sev = "medium" if years_behind >= 2 else "low"
+                sev = "low" if is_archive else ("medium" if years_behind >= 2 else "low")
                 self._add_finding(
                     severity=sev,
                     title=f"Stale footer copyright year ({stale_cr.get('detected_year')})",
@@ -326,7 +366,7 @@ class FreshnessValidator:
             dead_links = markers.get("dead_outbound_links", [])
             if dead_links:
                 sample_dead = [f"{d.get('url')} (status: {d.get('status_code') or d.get('error')})" for d in dead_links[:3]]
-                sev = "medium" if len(dead_links) >= 3 else "low"
+                sev = "low" if is_archive else ("medium" if len(dead_links) >= 3 else "low")
                 self._add_finding(
                     severity=sev,
                     title=f"Broken outbound reference links detected ({len(dead_links)} links)",
@@ -419,15 +459,15 @@ class FreshnessValidator:
             self._add_finding(
                 check_id="FC-04-sameas-missing",
                 severity="medium",
-                title="No sameAs disambiguation links in Organization schema",
+                title="No sameAs disambiguation links in organization identity schema",
                 detail=(
                     f"Brand '{brand_name}' does not declare any sameAs links in JSON-LD. "
                     "AI search engines cannot disambiguate the brand from identically named or similar entities."
                 ),
                 affected_urls=[self.site_url],
-                locator="Organization.sameAs",
+                locator="Organization.sameAs | NewsMediaOrganization.sameAs",
                 recommendation=(
-                    "Add a sameAs array to the Organization schema linking to official profiles: "
+                    "Add a sameAs array to the Organization or NewsMediaOrganization schema linking to official profiles: "
                     "Wikipedia, Wikidata, LinkedIn, Crunchbase, and verified social channels."
                 ),
             )

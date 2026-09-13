@@ -29,6 +29,7 @@ import report
 import safe_http
 import crawl_analyzer
 import page_fetcher
+import robots_analyzer
 import render_analyzer
 import engagement_analyzer
 from schema_validator import SchemaValidator
@@ -193,7 +194,7 @@ def test_engagement_analyzer():
     findings = engagement_analyzer.compile_findings(pages)
     _assert_contract(findings, "engagement")
     titles = " | ".join(f["title"].lower() for f in findings)
-    assert "viewport" in titles and "<h1>" in titles and "ambiguous" in titles, titles
+    assert "viewport" in titles and "h1" in titles and "generic labels" in titles, titles
 
 
 def test_combined_report_validates():
@@ -278,6 +279,122 @@ def test_fp_regressions():
     assert not any("missing /llms.txt" in f["title"].lower() for f in sd_findings)
     proactive = run_audit._proactive(sd_findings)
     assert not any("publish an llms.txt" in p["title"].lower() for p in proactive)
+
+
+def test_hardening_regressions():
+    """Production regressions found during Round-3 stress testing."""
+    import requests
+
+    # Read-only transport is enforced, not just documented.
+    req = requests.Request("POST", "https://example.com/").prepare()
+    try:
+        safe_http.SafeSession().send(req)
+        raise AssertionError("POST should be blocked")
+    except safe_http.UnsafeRequestError:
+        pass
+
+    # Semantic report checks reject duplicate IDs, count drift, and non-UTC timestamps.
+    f = report.make_finding(
+        "crawl-access-audit", "CA-X", "high", "x", "fix",
+        evidence_url="https://x/", evidence_source="html", evidence_observed="x")
+    duplicate = report.assemble_report("x", [f])
+    duplicate["findings"].append(dict(f))
+    duplicate["summary"]["total_findings"] = 2
+    duplicate["summary"]["high"] = 2
+    try:
+        report.validate_report(duplicate)
+        raise AssertionError("duplicate ids should fail")
+    except ValueError:
+        pass
+    drift = report.assemble_report("x", [f])
+    drift["summary"]["high"] = 0
+    try:
+        report.validate_report(drift)
+        raise AssertionError("summary drift should fail")
+    except ValueError:
+        pass
+    local_time = report.assemble_report("x", [f], audited_at="2026-09-13T10:00:00")
+    try:
+        report.validate_report(local_time)
+        raise AssertionError("naive timestamp should fail")
+    except ValueError:
+        pass
+
+    # A bot-wide root block is reported once, not expanded into synthetic path defects.
+    class FakeRobotsResponse:
+        status_code = 200
+        text = "User-agent: ChatGPT-User\nDisallow: /\n"
+    original_get = robots_analyzer.requests.get
+    robots_analyzer.requests.get = lambda *args, **kwargs: FakeRobotsResponse()
+    try:
+        analyzed = robots_analyzer.analyze("https://example.com", ["/", "/about", "/news"])
+    finally:
+        robots_analyzer.requests.get = original_get
+    assert analyzed["ai_search_bots_blocked"]
+    assert analyzed["critical_path_blocks"] == [], analyzed["critical_path_blocks"]
+
+    # Cloudflare 403 responses are identified as a challenge/WAF mechanism.
+    challenge = page_fetcher.detect_challenge_page(
+        "<title>Just a moment...</title>", {"Server": "cloudflare", "CF-RAY": "abc"}, 403)
+    assert challenge["detected"] and challenge["provider"] == "cloudflare", challenge
+
+    # Rich news publisher markup must not be downgraded because of a nested minimal org.
+    graph = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {"@type": "NewsMediaOrganization", "@id": "https://news.example/#org",
+             "name": "Example News", "url": "https://news.example/",
+             "logo": "https://news.example/logo.png",
+             "sameAs": ["https://en.wikipedia.org/wiki/Example_News"]},
+            {"@type": "NewsArticle", "headline": "Test headline",
+             "datePublished": "2026-09-13T09:00:00Z",
+             "author": {"@type": "Person", "name": "Reporter"},
+             "publisher": {"@type": "Organization", "name": "Example News"}},
+            {"@type": "SpeakableSpecification", "cssSelector": ["h1", ".summary"]},
+        ],
+    }
+    news_raw = {
+        "site": "https://news.example/",
+        "llms_txt": {"/llms.txt": {"present": False}},
+        "pages": [{"url": "https://news.example/", "status_code": 200,
+                   "content_type": "text/html", "json_ld": {"blocks": [{"index": 0, "data": graph}]},
+                   "open_graph": {}, "twitter_card": {},
+                   "meta": {"title": "Example News Homepage", "description": "A sufficiently descriptive summary for a news publisher homepage.", "favicons": ["/favicon.ico"]},
+                   "visible_cues": {"h1": ["Test headline"], "h2_sample": [],
+                                    "detected_prices": [], "detected_dates": [],
+                                    "text_sample": "Test headline Reporter", "body_char_count": 100}}],
+    }
+    news_findings = SchemaValidator(news_raw).run_all()
+    news_titles = " | ".join(x["title"].lower() for x in news_findings)
+    assert "valid newsarticle" in news_titles, news_titles
+    assert "valid speakablespecification" in news_titles, news_titles
+    assert "missing required properties in organization" not in news_titles, news_titles
+
+    # Historical editorial dates are observations, not active medium/high defects.
+    old_ts = 1_704_067_200  # 2024-01-01 UTC
+    archive_raw = {
+        "site": "https://news.example/",
+        "entity": {"detected_brand_name": "Example News", "aggregated_claims": {},
+                   "sameAs_links": ["https://en.wikipedia.org/wiki/Example_News"]},
+        "grounding": {"wikipedia": {"has_entry": True}, "wikidata": {"has_entry": True}},
+        "corroboration_templates": [],
+        "pages": [{"url": "https://news.example/news/2024/01/01/story", "status_code": 200,
+                   "content_type": "text/html",
+                   "date_signals": {"has_any_date_signal": True,
+                                    "freshest_date": {"source": "schema:datePublished", "timestamp": old_ts, "raw": "2024-01-01"},
+                                    "http_headers": {}},
+                   "staleness_markers": {}, "entity_data": {"nap": {}}}],
+    }
+    archive_findings = FreshnessValidator(archive_raw).run_all()
+    assert not any(x["severity"] in ("critical", "high", "medium") and "older than" in x["title"].lower()
+                   for x in archive_findings), [x["title"] for x in archive_findings]
+
+    # A blocked page cannot turn into phantom engagement defects.
+    blocked = engagement_analyzer.compile_findings([
+        {"url": "https://shop.example/", "status_code": 403,
+         "content_type": "text/html", "html": "<title>Just a moment...</title>"}
+    ])
+    assert blocked == [], blocked
 
 
 def main():

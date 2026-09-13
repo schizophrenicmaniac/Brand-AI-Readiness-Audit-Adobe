@@ -73,8 +73,9 @@
     ],
     "dead_link_check": {
       "enabled": true,
-      "max_links_per_page": 6,
-      "timeout_seconds": 5
+      "max_links_per_page": 4,
+      "max_links_sitewide": 8,
+      "timeout_seconds": 2.5
     }
   },
 
@@ -149,6 +150,14 @@
       "^/legal/?$"
     ],
     "skip_wikipedia_check_for_micro_businesses": true,
+    "archived_editorial_path_patterns": [
+      "/blog/",
+      "/news/",
+      "/article/",
+      "/press/",
+      "/press-release/"
+    ],
+    "archived_editorial_age_months": 24,
     "utility_paths": [
       "^/login",
       "^/signin",

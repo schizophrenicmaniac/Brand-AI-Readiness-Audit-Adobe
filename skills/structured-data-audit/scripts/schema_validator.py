@@ -13,6 +13,8 @@ Output: JSON findings report to stdout.
 """
 
 import argparse
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 import json
 import os
 import re
@@ -139,6 +141,42 @@ class SchemaValidator:
                 entities.extend(self._flatten_entities(item))
         return entities
 
+    @staticmethod
+    def _entity_types(entity: dict) -> list:
+        value = entity.get("@type")
+        return value if isinstance(value, list) else ([value] if isinstance(value, str) else [])
+
+    @staticmethod
+    def _is_minimal_organization(entity: dict) -> bool:
+        """Return true for lightweight nested publisher/brand references.
+
+        A name/@id-only Organization is a valid nested reference and should not be
+        graded as though it were the site's complete primary identity declaration.
+        """
+        meaningful = {k for k, v in entity.items() if k not in ("@type", "@context") and v not in (None, "", [], {})}
+        return meaningful.issubset({"@id", "name", "url"}) and "sameAs" not in entity
+
+    @staticmethod
+    def _parse_decimal(value):
+        try:
+            parsed = Decimal(str(value).replace(",", "").strip())
+            return parsed if parsed.is_finite() else None
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_iso_date(value):
+        if not isinstance(value, str) or not value.strip():
+            return None
+        clean = value.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(clean).date()
+        except ValueError:
+            try:
+                return date.fromisoformat(clean[:10])
+            except ValueError:
+                return None
+
     def _validate_context(self, context_val) -> bool:
         """Validate if @context matches allowed Schema.org patterns."""
         if not context_val:
@@ -228,33 +266,44 @@ class SchemaValidator:
 
             # Homepage identity checks
             if is_home:
-                expected_home = set(_CONFIG.get("jsonld", {}).get("homepage_expected_types", ["Organization", "WebSite", "LocalBusiness", "Corporation"]))
-                found_identity = any(t in type_names for t in expected_home)
+                expected_home = set(_CONFIG.get("jsonld", {}).get("homepage_expected_types", ["Organization", "WebSite", "LocalBusiness", "Corporation", "NewsMediaOrganization"]))
+                specific_identity_types = {"NewsMediaOrganization", "Corporation", "LocalBusiness"}
+                has_specific_identity = any(
+                    set(self._entity_types(ent)).intersection(specific_identity_types)
+                    for ent in all_entities
+                )
+                matched_identity_types = set()
+                for ent in all_entities:
+                    ent_types = set(self._entity_types(ent)).intersection(expected_home)
+                    if "Organization" in ent_types and has_specific_identity and self._is_minimal_organization(ent):
+                        ent_types.remove("Organization")
+                    matched_identity_types.update(ent_types)
+                found_identity = bool(matched_identity_types)
                 if not found_identity:
                     # Promoted to critical if the site has zero structured data anywhere
                     sev = "critical" if total_site_entities == 0 else "high"
                     self._add_finding(
                         check_id="SD-01-home-identity",
                         severity=sev,
-                        title="Missing Organization or WebSite schema on homepage",
+                        title="Missing organization identity or WebSite schema on homepage",
                         detail=(
-                            f"The homepage ({url}) lacks Organization, WebSite, or LocalBusiness JSON-LD schema. "
+                            f"The homepage ({url}) lacks Organization, NewsMediaOrganization, WebSite, or LocalBusiness JSON-LD schema. "
                             "AI assistants cannot reliably ground entity identity, official links, or logo."
                         ),
                         affected_urls=[url],
                         locator="script[type=application/ld+json] @type",
-                        expected="Organization | WebSite | LocalBusiness",
+                        expected="Organization | NewsMediaOrganization | WebSite | LocalBusiness",
                         recommendation=(
-                            "Add a JSON-LD block with @type Organization or WebSite, including name, url, logo, "
+                            "Add a JSON-LD block with an appropriate Organization subtype or WebSite, including name, url, logo, "
                             "and sameAs properties."
                         ),
                     )
                 else:
-                    matched = sorted([t for t in expected_home if t in type_names])
+                    matched = sorted(matched_identity_types)
                     self._add_finding(
                         check_id="SD-01-home-identity",
                         severity="info",
-                        title="Valid Organization or WebSite schema detected on homepage",
+                        title="Valid organization identity or WebSite schema detected on homepage",
                         detail=f"The homepage ({url}) declares valid identity schema ({', '.join(matched)}).",
                         affected_urls=[url],
                         locator="script[type=application/ld+json] @type",
@@ -417,6 +466,11 @@ class SchemaValidator:
             for b in valid_blocks:
                 all_entities.extend(self._flatten_entities(b["data"]))
 
+            has_specific_org = any(
+                set(self._entity_types(ent)).intersection({"NewsMediaOrganization", "Corporation", "LocalBusiness"})
+                for ent in all_entities
+            )
+
             for ent in all_entities:
                 t = ent.get("@type")
                 types_to_check = t if isinstance(t, list) else [t] if t else []
@@ -432,6 +486,11 @@ class SchemaValidator:
                     continue
 
                 for type_name in types_to_check:
+                    # A lightweight nested Organization (commonly NewsArticle.publisher)
+                    # is not a second, incomplete primary org when a more specific
+                    # organization is declared on the page.
+                    if type_name == "Organization" and has_specific_org and self._is_minimal_organization(ent):
+                        continue
                     if type_name in _SCHEMA_TYPES:
                         spec = _SCHEMA_TYPES[type_name]
                         # Check required properties
@@ -443,6 +502,19 @@ class SchemaValidator:
                                 detail=f"{type_name} schema on {url} is missing required properties: {', '.join(missing_req)}.",
                                 affected_urls=[url],
                                 recommendation=f"Add missing properties ({', '.join(missing_req)}) to the {type_name} markup.",
+                            )
+
+                        # Check one-of required properties used by types such as
+                        # SpeakableSpecification and AggregateRating.
+                        required_any = spec.get("required_any_properties", [])
+                        if required_any and not any(ent.get(p) for p in required_any):
+                            self._add_finding(
+                                check_id=f"SD-02-{type_name.lower()}-required-any",
+                                severity="high",
+                                title=f"Missing alternative required property in {type_name} schema",
+                                detail=f"{type_name} schema on {url} requires at least one of: {', '.join(required_any)}.",
+                                affected_urls=[url],
+                                recommendation=f"Add one of ({', '.join(required_any)}) to the {type_name} markup.",
                             )
 
                         # Check recommended properties
@@ -466,6 +538,155 @@ class SchemaValidator:
                             affected_urls=[url],
                             recommendation="Replace template or placeholder values with actual production brand data.",
                         )
+
+            self._validate_news_and_commerce(url, page, all_entities)
+
+    def _validate_news_and_commerce(self, url: str, page: dict, entities: list):
+        """Deterministic semantic validation beyond registry presence checks."""
+        valid_availability = set(_CONFIG.get("commerce", {}).get("valid_availability_values", []))
+        today = date.today()
+
+        for ent in entities:
+            types = self._entity_types(ent)
+
+            if "NewsArticle" in types:
+                required = ("headline", "datePublished", "author", "publisher")
+                date_pub = self._parse_iso_date(ent.get("datePublished"))
+                date_mod = self._parse_iso_date(ent.get("dateModified")) if ent.get("dateModified") else None
+                author_ok = isinstance(ent.get("author"), str) or (
+                    isinstance(ent.get("author"), dict) and bool(ent["author"].get("name") or ent["author"].get("@id"))
+                ) or (isinstance(ent.get("author"), list) and bool(ent.get("author")))
+                publisher = ent.get("publisher")
+                publisher_ok = isinstance(publisher, dict) and bool(publisher.get("name") or publisher.get("@id"))
+                errors = []
+                if ent.get("datePublished") and not date_pub:
+                    errors.append("datePublished is not a valid ISO-8601 date")
+                if ent.get("dateModified") and not date_mod:
+                    errors.append("dateModified is not a valid ISO-8601 date")
+                if date_pub and date_mod and date_mod < date_pub:
+                    errors.append("dateModified precedes datePublished")
+                if ent.get("author") and not author_ok:
+                    errors.append("author lacks a usable name or @id")
+                if publisher and not publisher_ok:
+                    errors.append("publisher lacks a usable name or @id")
+                if errors:
+                    self._add_finding(
+                        check_id="SD-02-newsarticle-semantic",
+                        severity="high",
+                        title="Invalid NewsArticle publication metadata",
+                        detail=f"NewsArticle on {url}: {'; '.join(errors)}.",
+                        affected_urls=[url],
+                        locator="NewsArticle",
+                        recommendation="Use ISO-8601 publication dates and identify author and publisher with names or stable @id values.",
+                    )
+                elif all(ent.get(p) for p in required) and date_pub and author_ok and publisher_ok:
+                    self._add_finding(
+                        check_id="SD-02-newsarticle-valid",
+                        severity="info",
+                        title="Valid NewsArticle publication metadata detected",
+                        detail="NewsArticle has a headline, valid publication date, identified author, and identified publisher.",
+                        affected_urls=[url],
+                        locator="NewsArticle",
+                        recommendation="Keep dateModified synchronized with substantive editorial updates.",
+                    )
+
+            if "SpeakableSpecification" in types:
+                selectors = []
+                for prop in ("cssSelector", "xpath"):
+                    value = ent.get(prop)
+                    selectors.extend(value if isinstance(value, list) else ([value] if isinstance(value, str) else []))
+                selectors = [s.strip() for s in selectors if isinstance(s, str) and s.strip()]
+                if selectors:
+                    self._add_finding(
+                        check_id="SD-02-speakable-valid",
+                        severity="info",
+                        title="Valid SpeakableSpecification selectors detected",
+                        detail=f"SpeakableSpecification provides {len(selectors)} non-empty CSS/XPath selector(s).",
+                        affected_urls=[url],
+                        locator="SpeakableSpecification.cssSelector|xpath",
+                        recommendation="Keep selectors limited to concise text that remains visible on the page.",
+                    )
+                elif ent.get("cssSelector") or ent.get("xpath"):
+                    self._add_finding(
+                        check_id="SD-02-speakable-invalid",
+                        severity="high",
+                        title="Invalid SpeakableSpecification selector values",
+                        detail="Speakable selectors must be a non-empty string or list of non-empty strings.",
+                        affected_urls=[url],
+                        locator="SpeakableSpecification.cssSelector|xpath",
+                        recommendation="Provide one or more non-empty cssSelector or xpath strings.",
+                    )
+
+            if "Product" in types:
+                offers = ent.get("offers")
+                offer_items = offers if isinstance(offers, list) else ([offers] if isinstance(offers, dict) else [])
+                if offer_items and not any("Offer" in self._entity_types(o) or o.get("price") is not None for o in offer_items):
+                    self._add_finding(
+                        check_id="SD-02-product-offers",
+                        severity="high",
+                        title="Product offers do not contain a usable Offer",
+                        detail=f"Product '{ent.get('name', '')}' has offers markup without an Offer type or price.",
+                        affected_urls=[url],
+                        locator="Product.offers",
+                        recommendation="Nest a valid Offer with price, priceCurrency, availability, and URL under Product.offers.",
+                    )
+
+            if "Offer" in types:
+                errors = []
+                price = self._parse_decimal(ent.get("price"))
+                if ent.get("price") is not None and (price is None or price < 0):
+                    errors.append("price must be a non-negative number")
+                currency = ent.get("priceCurrency")
+                if currency and not re.fullmatch(r"[A-Z]{3}", str(currency)):
+                    errors.append("priceCurrency must be an uppercase three-letter ISO 4217 code")
+                availability = str(ent.get("availability", "")).rstrip("/").split("/")[-1]
+                if availability and availability not in valid_availability:
+                    errors.append(f"availability '{availability}' is not a recognized ItemAvailability value")
+                valid_until = self._parse_iso_date(ent.get("priceValidUntil")) if ent.get("priceValidUntil") else None
+                if ent.get("priceValidUntil") and not valid_until:
+                    errors.append("priceValidUntil is not a valid ISO-8601 date")
+                elif valid_until and valid_until < today:
+                    errors.append(f"priceValidUntil expired on {valid_until.isoformat()}")
+                if errors:
+                    self._add_finding(
+                        check_id="SD-02-offer-semantic",
+                        severity="high",
+                        title="Invalid or stale Offer pricing metadata",
+                        detail=f"Offer on {url}: {'; '.join(errors)}.",
+                        affected_urls=[url],
+                        locator="Offer",
+                        recommendation="Publish a numeric current price, ISO currency, valid ItemAvailability URL/value, and a non-expired priceValidUntil.",
+                    )
+
+            if "AggregateRating" in types:
+                errors = []
+                rating = self._parse_decimal(ent.get("ratingValue"))
+                best = self._parse_decimal(ent.get("bestRating", 5))
+                worst = self._parse_decimal(ent.get("worstRating", 1))
+                count_raw = ent.get("ratingCount", ent.get("reviewCount"))
+                count = self._parse_decimal(count_raw)
+                if ent.get("ratingValue") is not None and rating is None:
+                    errors.append("ratingValue must be numeric")
+                if ent.get("bestRating") is not None and best is None:
+                    errors.append("bestRating must be numeric")
+                if ent.get("worstRating") is not None and worst is None:
+                    errors.append("worstRating must be numeric")
+                if count_raw is not None and count is None:
+                    errors.append("ratingCount/reviewCount must be numeric")
+                if rating is not None and best is not None and worst is not None and not (worst <= rating <= best):
+                    errors.append(f"ratingValue {rating} is outside the declared {worst}-{best} range")
+                if count is not None and (count <= 0 or count != count.to_integral_value()):
+                    errors.append("ratingCount/reviewCount must be a positive integer")
+                if errors:
+                    self._add_finding(
+                        check_id="SD-02-aggregate-rating-semantic",
+                        severity="high",
+                        title="Invalid AggregateRating values",
+                        detail=f"AggregateRating on {url}: {'; '.join(errors)}.",
+                        affected_urls=[url],
+                        locator="AggregateRating",
+                        recommendation="Keep ratingValue within bestRating/worstRating and provide a positive integer ratingCount or reviewCount.",
+                    )
 
     def validate_sd03_opengraph(self):
         """SD-03: Open Graph Protocol Tags."""
@@ -663,6 +884,11 @@ class SchemaValidator:
             h1s = visible.get("h1", [])
             body_text = visible.get("text_sample", "").lower()
             detected_prices = visible.get("detected_prices", [])
+            detected_currencies = {str(c).upper() for c in visible.get("detected_currencies", [])}
+            detected_availability = {str(a).lower() for a in visible.get("detected_availability", [])}
+            detected_ratings = {
+                value for value in (self._parse_decimal(r) for r in visible.get("detected_ratings", [])) if value is not None
+            }
             detected_dates = visible.get("detected_dates", [])
             meta_title = page.get("meta", {}).get("title", "")
 
@@ -678,7 +904,7 @@ class SchemaValidator:
             for ent in all_entities:
                 t = ent.get("@type")
                 t_list = t if isinstance(t, list) else ([t] if t else [])
-                checked = {"Product", "Article", "SoftwareApplication", "Service"}
+                checked = {"Product", "Article", "BlogPosting", "NewsArticle", "SoftwareApplication", "Service"}
                 match_t = next((x for x in t_list if x in checked), None)
                 name = ent.get("name") or ent.get("headline")
                 if match_t and isinstance(name, str) and (h1s or meta_title):
@@ -736,6 +962,7 @@ class SchemaValidator:
                                         str_int = f"{int(s_price)}"
                                         if str_num not in body_text and str_int not in body_text:
                                             self._add_finding(
+                                                check_id="SD-07-offer-price-consistency",
                                                 severity="high",
                                                 title="Pricing discrepancy between Schema Offer and visible DOM text",
                                                 detail=(
@@ -745,10 +972,71 @@ class SchemaValidator:
                                                 affected_urls=[url],
                                                 recommendation="Ensure Schema.org Offer price exactly matches the visible price displayed to visitors.",
                                             )
+                                    if currency and detected_currencies and str(currency).upper() not in detected_currencies:
+                                        self._add_finding(
+                                            check_id="SD-07-offer-currency-consistency",
+                                            severity="high",
+                                            title="Currency discrepancy between Schema Offer and visible content",
+                                            detail=(
+                                                f"Schema Offer declares {currency}, while visible pricing uses "
+                                                f"{', '.join(sorted(detected_currencies))}."
+                                            ),
+                                            affected_urls=[url],
+                                            recommendation="Align Offer.priceCurrency with the currency visibly attached to the advertised price.",
+                                        )
                                 except ValueError:
                                     pass
 
-            # 3. Publication Date Conflicts
+                    availability = str(offer_ent.get("availability", "")).rstrip("/").split("/")[-1].lower()
+                    availability_groups = {
+                        "instock": {"in stock", "available online"},
+                        "outofstock": {"out of stock", "unavailable"},
+                        "soldout": {"sold out"},
+                        "preorder": {"pre-order", "preorder"},
+                        "backorder": {"back-order", "backorder"},
+                    }
+                    if availability and detected_availability:
+                        expected_visible = availability_groups.get(availability, set())
+                        visible_states = {
+                            state for state, cues in availability_groups.items()
+                            if not cues.isdisjoint(detected_availability)
+                        }
+                        # Multiple visible states usually mean a multi-variant/product
+                        # page; without DOM-to-Offer association a contradiction would
+                        # be speculative, so only compare one unambiguous state.
+                        contradictory = len(visible_states) == 1 and availability not in visible_states
+                        if expected_visible and contradictory:
+                            self._add_finding(
+                                check_id="SD-07-offer-availability-consistency",
+                                severity="high",
+                                title="Availability discrepancy between Schema Offer and visible content",
+                                detail=(
+                                    f"Schema Offer declares '{offer_ent.get('availability')}', while visible content says "
+                                    f"{', '.join(sorted(detected_availability))}."
+                                ),
+                                affected_urls=[url],
+                                recommendation="Update Offer.availability whenever the visible stock state changes.",
+                            )
+
+            # 3. Aggregate rating consistency with visible rating text.
+            for ent in all_entities:
+                if "AggregateRating" not in self._entity_types(ent):
+                    continue
+                schema_rating = self._parse_decimal(ent.get("ratingValue"))
+                if schema_rating is not None and detected_ratings and all(abs(schema_rating - r) > Decimal("0.05") for r in detected_ratings):
+                    self._add_finding(
+                        check_id="SD-07-rating-consistency",
+                        severity="high",
+                        title="AggregateRating discrepancy between schema and visible content",
+                        detail=(
+                            f"Schema declares ratingValue '{ent.get('ratingValue')}', while visible rating text contains "
+                            f"{', '.join(str(r) for r in sorted(detected_ratings))}."
+                        ),
+                        affected_urls=[url],
+                        recommendation="Keep AggregateRating.ratingValue and rating/review counts synchronized with the visible rating summary.",
+                    )
+
+            # 4. Publication Date Conflicts
             for ent in all_entities:
                 t = ent.get("@type")
                 t_list = t if isinstance(t, list) else ([t] if t else [])

@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""engagement_extractor.py — Extract on-site engagement, navigation, orientation, and performance metrics.
+"""Extract measurable engagement signals from fetched HTML pages.
 
-Part of the engagement-audit skill in the Brand AI Readiness Audit marketplace.
-Fetches pages, extracts navigation structures, orientation cues, load performance red flags,
-mobile viewport configuration, call-to-action characteristics, site search elements, and context retention features.
+Public integration:
+    build_raw(base_url, paths, session, max_pages) -> raw engagement dict
 
-Usage:
-    python engagement_extractor.py --url https://example.com
-    python engagement_extractor.py --url https://example.com --pages /,/pricing,/about --max-pages 10
-    python engagement_extractor.py --url https://example.com --output /tmp/engagement-raw.json
-
-Output: JSON to stdout or specified file.
+The caller may pass a shared/cached requests-compatible session. Failed, blocked,
+empty, and non-HTML responses are retained as coverage evidence but are never
+parsed as pages suitable for engagement validation.
 """
 
 import argparse
@@ -25,493 +21,423 @@ try:
     import requests
     from bs4 import BeautifulSoup
 except ImportError:
-    print(
-        json.dumps({
-            "error": "Missing dependencies: requests or beautifulsoup4. "
-                     "Install with: pip install -r requirements.txt"
-        }),
-        file=sys.stderr,
-    )
+    print(json.dumps({"error": "Missing dependencies: requests or beautifulsoup4. Install with: pip install -r requirements.txt"}), file=sys.stderr)
     sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Reference file loader — resolves paths relative to this script's location
-# ---------------------------------------------------------------------------
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REFS_DIR = os.path.normpath(os.path.join(_SCRIPTS_DIR, "..", "references"))
 
 
 def _load_json(filename: str) -> dict:
-    path = os.path.join(_REFS_DIR, filename)
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(os.path.join(_REFS_DIR, filename), "r", encoding="utf-8") as f:
             return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON in {path}: {e}"}), file=sys.stderr)
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
 _CONFIG = _load_json("engagement-config.json")
-
-_USER_AGENT = _CONFIG.get("extraction", {}).get(
-    "user_agent",
-    "BrandAIReadinessAudit/1.0 (+https://github.com/brand-ai-readiness-audit)",
+_EXTRACTION = _CONFIG.get("extraction", {})
+_USER_AGENT = _EXTRACTION.get("user_agent", "BrandAIReadinessAudit/1.0")
+_DEFAULT_TIMEOUT = _EXTRACTION.get("default_timeout_seconds", 15)
+_DEFAULT_MAX_PAGES = _EXTRACTION.get("default_max_pages", 10)
+_BLOCKED_STATUS = {401, 403, 407, 423, 429, 451, 503}
+_BLOCK_MARKERS = (
+    "cf-chl-", "cloudflare ray id", "checking your browser", "just a moment...",
+    "access denied", "verify you are human", "captcha", "request blocked",
 )
-_DEFAULT_TIMEOUT = _CONFIG.get("extraction", {}).get("default_timeout_seconds", 15)
-_DEFAULT_MAX_PAGES = _CONFIG.get("extraction", {}).get("default_max_pages", 10)
+
+
+def _normalize_base(url: str) -> str:
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+def _is_same_site(candidate: str, page_url: str) -> bool:
+    target = urlparse(candidate)
+    page = urlparse(page_url)
+    if target.scheme not in ("http", "https"):
+        return False
+    return target.netloc.lower().removeprefix("www.") == page.netloc.lower().removeprefix("www.")
+
+
+def _unique_links(elements, page_url: str) -> list:
+    links, seen = [], set()
+    for a in elements:
+        href = (a.get("href") or "").strip()
+        if not href or href.lower().startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        full = urljoin(page_url, href)
+        key = full.split("#", 1)[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append({
+            "text": a.get_text(" ", strip=True)[:120],
+            "href": href,
+            "full_url": full,
+            "internal": _is_same_site(full, page_url),
+        })
+    return links
+
+
+def _page_profile(soup: BeautifulSoup, page_url: str) -> dict:
+    path = urlparse(page_url).path.lower()
+    body_classes = " ".join(soup.body.get("class", [])) if soup.body else ""
+    hints = (path + " " + body_classes + " " + (soup.title.get_text(" ", strip=True).lower() if soup.title else ""))
+    commercial_terms = ("pricing", "plans", "product", "shop", "store", "cart", "checkout", "buy")
+    docs_terms = ("docs", "documentation", "developer", "reference", "guide", "api")
+    editorial_terms = ("news", "article", "blog", "story", "press", "journal", "magazine")
+    article = bool(soup.find("article"))
+    scores = {
+        "commercial": sum(term in hints for term in commercial_terms),
+        "documentation": sum(term in hints for term in docs_terms),
+        "editorial": sum(term in hints for term in editorial_terms) + int(article),
+    }
+    highest = max(scores.values())
+    # Prefer editorial/docs on ties so a product-news article is not treated as a
+    # conversion page merely because its title contains "product".
+    kind = "general"
+    for candidate in ("editorial", "documentation", "commercial"):
+        if highest and scores[candidate] == highest:
+            kind = candidate
+            break
+    return {"kind": kind, "signals": scores, "has_article_element": article}
 
 
 def extract_navigation_data(soup: BeautifulSoup, page_url: str) -> dict:
-    """Analyze navigation clarity, key destinations, and header/footer structure."""
-    nav_cfg = _CONFIG.get("navigation", {})
-    key_destinations = nav_cfg.get("key_destinations", [
-        "about", "pricing", "contact", "products", "services", "solutions", "help", "support", "docs"
-    ])
-
-    # Find primary nav elements
-    nav_elements = soup.find_all(["nav", "div", "header"], role="navigation")
-    if not nav_elements:
-        nav_elements = soup.find_all("nav")
-    if not nav_elements:
-        nav_elements = soup.find_all(class_=re.compile(r"\b(nav|navbar|menu|header-nav|main-nav)\b", re.I))
-
-    header_el = soup.find("header")
-    footer_el = soup.find("footer")
-
-    # Extract all links and categorize by location
-    all_links = []
-    primary_nav_links = []
-    footer_links = []
-
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "").strip()
-        text = a.get_text(separator=" ", strip=True)
-        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+    semantic = soup.select("nav, [role='navigation']")
+    inferred = soup.select("header .nav, header .navbar, header .menu, .main-navigation, .primary-navigation")
+    containers = semantic or inferred
+    header = soup.find("header")
+    footer = soup.find("footer")
+    primary_elements = []
+    for container in containers:
+        if footer and (container is footer or footer in container.parents):
             continue
-        full_url = urljoin(page_url, href)
-        link_record = {"text": text, "href": href, "full_url": full_url}
-        all_links.append(link_record)
+        primary_elements.extend(container.find_all("a", href=True))
+    if not primary_elements and header:
+        primary_elements = header.find_all("a", href=True)
 
-        # Check if inside primary nav
-        is_primary = any(nav in a.parents for nav in nav_elements) or (header_el and header_el in a.parents)
-        if is_primary:
-            primary_nav_links.append(link_record)
-
-        # Check if inside footer
-        is_footer = footer_el and footer_el in a.parents
-        if is_footer:
-            footer_links.append(link_record)
-
-    # Detect which key destinations are covered
-    destinations_found = {}
-    for dest in key_destinations:
-        dest_pattern = re.compile(rf"\b{dest}\b", re.IGNORECASE)
-        found_in_primary = any(dest_pattern.search(l["text"]) or dest_pattern.search(l["href"]) for l in primary_nav_links)
-        found_in_footer = any(dest_pattern.search(l["text"]) or dest_pattern.search(l["href"]) for l in footer_links)
-        found_anywhere = any(dest_pattern.search(l["text"]) or dest_pattern.search(l["href"]) for l in all_links)
-
-        destinations_found[dest] = {
-            "in_primary_nav": found_in_primary,
-            "in_footer": found_in_footer,
-            "found_anywhere": found_anywhere,
+    all_links = _unique_links(soup.find_all("a", href=True), page_url)
+    primary_links = _unique_links(primary_elements, page_url)
+    footer_links = _unique_links(footer.find_all("a", href=True), page_url) if footer else []
+    terms = _CONFIG.get("navigation", {}).get("key_destinations", [])
+    destinations = {}
+    for term in terms:
+        pattern = re.compile(r"(?:^|[\W_-])" + re.escape(term) + r"(?:$|[\W_-])", re.I)
+        match = lambda link: bool(pattern.search(link["text"]) or pattern.search(link["href"]))
+        destinations[term] = {
+            "in_primary_nav": any(match(link) for link in primary_links),
+            "in_footer": any(match(link) for link in footer_links),
+            "found_anywhere": any(match(link) for link in all_links),
         }
-
+    labels = sorted({link["text"].strip().lower() for link in primary_links if link["text"].strip()})
     return {
-        "has_primary_nav": len(nav_elements) > 0,
-        "primary_nav_link_count": len(primary_nav_links),
-        "total_internal_links": len(all_links),
-        "key_destinations": destinations_found,
+        "has_primary_nav": bool(containers or len(primary_links) >= 2),
+        "has_navigation_landmark": bool(semantic),
+        "primary_nav_link_count": len(primary_links),
+        "internal_link_count": sum(link["internal"] for link in all_links),
+        "total_links": len(all_links),
+        "primary_nav_labels": labels[:40],
+        "primary_nav_links_sample": primary_links[:12],
+        "key_destinations": destinations,
     }
 
 
+def _has_breadcrumb_schema(soup: BeautifulSoup) -> bool:
+    for script in soup.find_all("script", type=re.compile(r"ld\+json", re.I)):
+        if "breadcrumblist" in script.get_text(" ", strip=True).lower():
+            return True
+    return bool(soup.find(attrs={"itemtype": re.compile(r"BreadcrumbList", re.I)}))
+
+
 def extract_orientation_data(soup: BeautifulSoup, page_url: str) -> dict:
-    """Analyze page orientation cues: h1, above-the-fold value proposition, and breadcrumbs."""
-    parsed = urlparse(page_url)
-    path_segments = [seg for seg in parsed.path.strip("/").split("/") if seg]
-    path_depth = len(path_segments)
-
-    # 1. H1 Headings
-    h1_tags = soup.find_all("h1")
-    h1_list = [h.get_text(separator=" ", strip=True) for h in h1_tags if h.get_text(separator=" ", strip=True)]
-
-    # 2. Hero copy / Above-the-fold value proposition
-    hero_text = ""
-    # Try finding hero container or main intro
-    hero_container = soup.find(class_=re.compile(r"\b(hero|intro|banner|header-content|lead|value-prop)\b", re.I))
-    if hero_container:
-        p_tag = hero_container.find(["p", "h2", "div"])
-        if p_tag:
-            hero_text = p_tag.get_text(separator=" ", strip=True)
-    if not hero_text:
-        # Fallback: look for the first non-empty paragraph in body
-        for p in soup.find_all("p"):
-            t = p.get_text(separator=" ", strip=True)
-            if len(t) >= 20:
-                hero_text = t
-                break
-
-    # 3. Breadcrumb navigation
-    breadcrumb_cfg = _CONFIG.get("orientation", {})
-    has_visible_breadcrumbs = False
+    depth = len([part for part in urlparse(page_url).path.split("/") if part])
+    h1s = [h.get_text(" ", strip=True) for h in soup.find_all("h1") if h.get_text(" ", strip=True)]
+    breadcrumb = soup.select_one(".breadcrumb, .breadcrumbs, [aria-label*='breadcrumb' i], nav[aria-label*='breadcrumb' i]")
     breadcrumb_items = []
+    if breadcrumb:
+        breadcrumb_items = [text for text in (el.get_text(" ", strip=True) for el in breadcrumb.find_all(["a", "li"])) if text][:12]
 
-    # Check for visible breadcrumb UI
-    bc_selectors = [
-        ".breadcrumb", ".breadcrumbs", "[aria-label='breadcrumb']", "[aria-label='Breadcrumb']",
-        "nav.breadcrumb", "ol.breadcrumb", "ul.breadcrumb"
-    ]
-    for sel in bc_selectors:
-        bc_elem = soup.select_one(sel)
-        if bc_elem:
-            has_visible_breadcrumbs = True
-            for li in bc_elem.find_all(["li", "a"]):
-                txt = li.get_text(separator=" ", strip=True)
-                if txt and txt not in breadcrumb_items and txt not in ("/", ">", "»"):
-                    breadcrumb_items.append(txt)
+    main = soup.find("main") or soup.body or soup
+    intro = ""
+    hero = main.find(class_=re.compile(r"(?:^|[-_ ])(hero|intro|lead|banner|value[-_ ]?prop)(?:$|[-_ ])", re.I))
+    candidates = hero.find_all(["p", "h2"], limit=3) if hero else main.find_all(["p", "h2"], limit=5)
+    for candidate in candidates:
+        text = candidate.get_text(" ", strip=True)
+        if len(text) >= 20:
+            intro = text
             break
-
-    # Also check JSON-LD BreadcrumbList
-    has_schema_breadcrumbs = False
-    for script in soup.find_all("script", type="application/ld+json"):
-        content = script.string or script.get_text() or ""
-        if "BreadcrumbList" in content:
-            has_schema_breadcrumbs = True
-            break
-
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
     return {
-        "url_path_depth": path_depth,
-        "h1_count": len(h1_list),
-        "h1_elements": h1_list,
-        "primary_h1": h1_list[0] if h1_list else None,
-        "hero_value_prop": hero_text[:250] if hero_text else None,
-        "hero_value_prop_chars": len(hero_text),
-        "has_breadcrumbs": has_visible_breadcrumbs or has_schema_breadcrumbs,
-        "has_visible_breadcrumbs": has_visible_breadcrumbs,
-        "has_schema_breadcrumbs": has_schema_breadcrumbs,
+        "url_path_depth": depth,
+        "document_title": title[:200],
+        "h1_count": len(h1s),
+        "h1_elements": h1s[:8],
+        "primary_h1": h1s[0] if h1s else None,
+        "hero_value_prop": intro[:300] or None,
+        "hero_value_prop_chars": len(intro),
+        "has_breadcrumbs": bool(breadcrumb) or _has_breadcrumb_schema(soup),
+        "has_visible_breadcrumbs": bool(breadcrumb),
+        "has_schema_breadcrumbs": _has_breadcrumb_schema(soup),
         "breadcrumb_items": breadcrumb_items,
     }
 
 
 def extract_performance_red_flags(soup: BeautifulSoup, page_url: str) -> dict:
-    """Detect DOM and resource architecture red flags (render-blocking scripts, images, domains)."""
-    parsed_page = urlparse(page_url)
-    page_domain = parsed_page.netloc.lower().replace("www.", "")
-
-    head = soup.find("head") or soup
-
-    # 1. Render-blocking scripts in <head>
-    render_blocking_scripts = []
-    total_head_scripts = 0
-    for s in head.find_all("script"):
-        src = s.get("src", "").strip()
-        stype = (s.get("type") or "").strip().lower()
-        if stype in ("application/ld+json", "application/json"):
-            continue
-        total_head_scripts += 1
-        if src:
-            is_async = s.has_attr("async")
-            is_defer = s.has_attr("defer")
-            is_module = stype == "module"
-            if not (is_async or is_defer or is_module):
-                render_blocking_scripts.append(src)
-
-    # 2. External stylesheets in <head>
+    head = soup.head or soup
+    blocking = []
+    for script in head.find_all("script", src=True):
+        stype = (script.get("type") or "").lower()
+        if stype not in ("application/ld+json", "application/json") and not any(script.has_attr(a) for a in ("async", "defer")) and stype != "module":
+            blocking.append(script.get("src"))
     stylesheets = []
-    for link in head.find_all("link", rel=True):
-        rel = link.get("rel")
-        rels = [r.lower() for r in (rel if isinstance(rel, list) else [rel])]
-        if "stylesheet" in rels:
-            href = link.get("href", "").strip()
-            if href:
-                stylesheets.append(href)
-
-    # 3. Image dimensions & lazy loading
-    all_imgs = soup.find_all("img")
-    missing_dimensions = 0
-    missing_lazy_loading = 0
-
-    for idx, img in enumerate(all_imgs):
-        has_width = img.has_attr("width")
-        has_height = img.has_attr("height")
-        if not (has_width and has_height):
-            missing_dimensions += 1
-
-        # Images after the first 2 should ideally be lazy loaded
-        if idx >= 2:
-            loading = (img.get("loading") or "").strip().lower()
-            if loading != "lazy":
-                missing_lazy_loading += 1
-
-    # 4. Third-party domains sprawl
-    third_party_domains = set()
-    for tag in soup.find_all(["script", "link", "iframe", "img"]):
-        src = tag.get("src") or tag.get("href") or ""
-        if src.startswith("http"):
-            parsed_src = urlparse(src)
-            src_domain = parsed_src.netloc.lower().replace("www.", "")
-            if src_domain and src_domain != page_domain and not src_domain.endswith("." + page_domain):
-                third_party_domains.add(src_domain)
-
+    for link in head.find_all("link", href=True):
+        rel = link.get("rel") or []
+        rel_values = rel if isinstance(rel, list) else str(rel).split()
+        if "stylesheet" in [str(value).lower() for value in rel_values]:
+            stylesheets.append(link.get("href"))
+    images = soup.find_all("img")
+    missing_dimensions = [img.get("src") or img.get("alt") or "img" for img in images if not (img.get("width") and img.get("height"))]
+    below_initial = images[2:]
+    missing_lazy = [img.get("src") or img.get("alt") or "img" for img in below_initial if (img.get("loading") or "").lower() != "lazy"]
+    page_host = urlparse(page_url).netloc.lower().removeprefix("www.")
+    domains = set()
+    for tag in soup.find_all(["script", "link", "iframe", "img", "source"]):
+        ref = tag.get("src") or tag.get("href") or tag.get("srcset") or ""
+        candidate = ref.split(",", 1)[0].strip().split(" ", 1)[0]
+        host = urlparse(urljoin(page_url, candidate)).netloc.lower().removeprefix("www.")
+        if host and host != page_host and not host.endswith("." + page_host):
+            domains.add(host)
+    count = len(images)
     return {
-        "total_head_scripts": total_head_scripts,
-        "render_blocking_scripts_count": len(render_blocking_scripts),
-        "render_blocking_scripts": render_blocking_scripts[:5],
+        "total_head_scripts": len(head.find_all("script")),
+        "render_blocking_scripts_count": len(blocking),
+        "render_blocking_scripts": blocking[:8],
         "external_stylesheets_count": len(stylesheets),
-        "external_stylesheets": stylesheets[:5],
-        "total_images": len(all_imgs),
-        "images_missing_dimensions": missing_dimensions,
-        "images_missing_lazy_loading": missing_lazy_loading,
-        "third_party_domains_count": len(third_party_domains),
-        "third_party_domains_sample": sorted(list(third_party_domains))[:8],
+        "external_stylesheets": stylesheets[:8],
+        "total_images": count,
+        "images_missing_dimensions": len(missing_dimensions),
+        "images_missing_dimensions_ratio": round(len(missing_dimensions) / count, 3) if count else 0,
+        "images_missing_dimensions_sample": missing_dimensions[:5],
+        "below_initial_images": len(below_initial),
+        "images_missing_lazy_loading": len(missing_lazy),
+        "images_missing_lazy_loading_sample": missing_lazy[:5],
+        "third_party_domains_count": len(domains),
+        "third_party_domains_sample": sorted(domains)[:10],
     }
 
 
 def extract_mobile_readiness(soup: BeautifulSoup) -> dict:
-    """Analyze mobile viewport configuration and responsive viewport restrictions."""
-    viewport_meta = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
-    viewport_content = viewport_meta.get("content", "").strip() if viewport_meta else ""
-
-    has_viewport = bool(viewport_content)
-    has_width_device = "width=device-width" in viewport_content.lower()
-    has_initial_scale = "initial-scale" in viewport_content.lower()
-
-    # Check for forbidden accessibility anti-patterns
-    disables_zoom = any(pat in viewport_content.lower() for pat in [
-        "user-scalable=no", "user-scalable=0", "maximum-scale=1.0", "maximum-scale=1"
-    ])
-
+    viewport = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
+    content = (viewport.get("content") or "").strip() if viewport else ""
+    lower = re.sub(r"\s+", "", content.lower())
+    user_scalable_no = bool(re.search(r"user-scalable=(?:no|0)(?:[,;]|$)", lower))
+    maximum = re.search(r"maximum-scale=([0-9]+(?:\.[0-9]+)?)", lower)
+    maximum_value = float(maximum.group(1)) if maximum else None
     return {
-        "has_viewport_meta": has_viewport,
-        "viewport_content": viewport_content,
-        "has_width_device": has_width_device,
-        "has_initial_scale": has_initial_scale,
-        "disables_zoom": disables_zoom,
+        "has_viewport_meta": bool(viewport and content),
+        "viewport_content": content,
+        "has_width_device": bool(re.search(r"(?:^|[,;])width=device-width(?:[,;]|$)", lower)),
+        "has_initial_scale": bool(re.search(r"(?:^|[,;])initial-scale=1(?:\.0+)?(?:[,;]|$)", lower)),
+        "maximum_scale": maximum_value,
+        "disables_zoom": user_scalable_no or (maximum_value is not None and maximum_value < 2),
     }
 
 
 def extract_calls_to_action(soup: BeautifulSoup) -> dict:
-    """Extract and categorize CTA buttons and prominent action links."""
-    cta_cfg = _CONFIG.get("calls_to_action", {})
-    actionable_keywords = cta_cfg.get("actionable_cta_keywords", [
-        "start free trial", "get started", "request demo", "buy now", "subscribe", "download",
-        "sign up", "book a demo", "try free", "join now", "create account", "contact sales", "order now"
-    ])
-    generic_phrases = cta_cfg.get("generic_cta_phrases", [
-        "learn more", "click here", "read more", "more", "submit", "go", "continue", "view more"
-    ])
-
-    cta_elements = []
-
-    # Find buttons and styled CTA links
+    cfg = _CONFIG.get("calls_to_action", {})
+    actionable_words = cfg.get("actionable_cta_keywords", [])
+    generic_words = cfg.get("generic_cta_phrases", [])
+    records = []
     for elem in soup.find_all(["button", "a", "input"]):
-        is_cta = False
-        text = ""
-
-        if elem.name == "button" or elem.get("role") == "button":
-            is_cta = True
-            text = elem.get_text(separator=" ", strip=True)
-        elif elem.name == "input" and elem.get("type") in ("submit", "button"):
-            is_cta = True
-            text = elem.get("value", "").strip()
-        elif elem.name == "a":
-            classes = " ".join(elem.get("class", [])) if isinstance(elem.get("class"), list) else str(elem.get("class") or "")
-            text_cand = elem.get_text(separator=" ", strip=True)
-            text_cand_lower = text_cand.lower()
-            if (
-                re.search(r"\b(btn|button|cta|action-link)\b", classes, re.I)
-                or elem.get("role") == "button"
-                or any(kw in text_cand_lower for kw in actionable_keywords)
-                or any(gp == text_cand_lower or text_cand_lower.startswith(gp) for gp in generic_phrases)
-            ):
-                is_cta = True
-                text = text_cand
-
-        if is_cta and text and len(text) <= 60:
-            cta_elements.append(text)
-
-    # Classify CTAs
-    actionable_ctas = []
-    generic_ctas = []
-    other_ctas = []
-
-    for text in cta_elements:
-        text_lower = text.lower()
-        if any(kw in text_lower for kw in actionable_keywords):
-            actionable_ctas.append(text)
-        elif any(gp == text_lower or text_lower.startswith(gp) for gp in generic_phrases):
-            generic_ctas.append(text)
-        else:
-            other_ctas.append(text)
-
+        text = (elem.get("value") if elem.name == "input" else elem.get_text(" ", strip=True)) or ""
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or len(text) > 80:
+            continue
+        classes = " ".join(elem.get("class") or [])
+        lower = text.lower()
+        styled = bool(re.search(r"(?:^|[-_ ])(?:btn|button|cta|action)(?:$|[-_ ])", classes, re.I))
+        control = elem.name == "button" or elem.get("role") == "button" or (elem.name == "input" and (elem.get("type") or "").lower() in ("submit", "button"))
+        actionable = any(word in lower for word in actionable_words)
+        generic = any(lower == word or lower.startswith(word + " ") for word in generic_words)
+        if not (styled or control or actionable or generic):
+            continue
+        records.append({"text": text, "element": elem.name, "styled": styled, "actionable": actionable, "generic": generic})
+    actionable = [r for r in records if r["actionable"]]
+    generic = [r for r in records if r["generic"]]
     return {
-        "total_ctas": len(cta_elements),
-        "actionable_ctas_count": len(actionable_ctas),
-        "generic_ctas_count": len(generic_ctas),
-        "actionable_ctas_sample": actionable_ctas[:5],
-        "generic_ctas_sample": generic_ctas[:5],
-        "all_ctas_sample": cta_elements[:8],
+        "total_ctas": len(records),
+        "actionable_ctas_count": len(actionable),
+        "actionable_ctas_unique_count": len({r["text"].lower() for r in actionable}),
+        "generic_ctas_count": len(generic),
+        "generic_cta_ratio": round(len(generic) / len(records), 3) if records else 0,
+        "actionable_ctas_sample": [r["text"] for r in actionable[:6]],
+        "generic_ctas_sample": [r["text"] for r in generic[:6]],
+        "all_ctas_sample": [r["text"] for r in records[:10]],
+        "cta_evidence": records[:12],
     }
 
 
 def extract_site_search(soup: BeautifulSoup) -> dict:
-    """Detect site search inputs, forms, and search trigger components."""
-    search_inputs = []
+    inputs = []
     for inp in soup.find_all("input"):
-        itype = (inp.get("type") or "").lower()
-        iname = (inp.get("name") or "").lower()
-        iplace = (inp.get("placeholder") or "").lower()
-
-        if itype == "search" or "search" in iname or iname == "q" or "search" in iplace:
-            search_inputs.append({
-                "type": itype,
-                "name": iname,
-                "placeholder": inp.get("placeholder", ""),
-                "has_aria_label": bool(inp.get("aria-label") or inp.get("title")),
-            })
-
-    search_forms = soup.find_all("form", attrs={"action": re.compile(r"search", re.I)})
-    search_roles = soup.find_all(attrs={"role": "search"})
-
-    # Check for search icon / button or search aria-labels
-    search_icons = soup.find_all(class_=re.compile(r"\b(search-icon|search-btn|fa-search|icon-search)\b", re.I))
-    search_buttons = soup.find_all(["button", "a"], attrs={"aria-label": re.compile(r"search", re.I)})
-
-    has_search = bool(search_inputs or search_forms or search_roles or search_icons or search_buttons)
-
+        attrs = " ".join(str(inp.get(name) or "") for name in ("type", "name", "placeholder", "aria-label", "title"))
+        if re.search(r"\b(search|site search)\b", attrs, re.I) or (inp.get("name") or "").lower() == "q":
+            inputs.append({"type": inp.get("type", ""), "name": inp.get("name", ""), "placeholder": inp.get("placeholder", ""), "accessible_name": inp.get("aria-label") or inp.get("title") or inp.get("placeholder") or ""})
+    forms = soup.find_all("form", action=re.compile(r"search", re.I))
+    roles = soup.find_all(attrs={"role": "search"})
+    labelled_triggers = soup.find_all(["button", "a"], attrs={"aria-label": re.compile(r"search", re.I)})
+    icon_triggers = soup.find_all(["button", "a"], class_=re.compile(r"(?:^|[-_ ])(?:search|search-icon|search-btn)(?:$|[-_ ])", re.I))
+    inaccessible = [el for el in icon_triggers if not (el.get("aria-label") or el.get("title") or el.get_text(" ", strip=True))]
     return {
-        "has_search": has_search,
-        "search_inputs_count": len(search_inputs),
-        "search_forms_count": len(search_forms),
-        "has_search_role": len(search_roles) > 0,
-        "search_inputs_sample": search_inputs[:2],
+        "has_search": bool(inputs or forms or roles or labelled_triggers or icon_triggers),
+        "search_inputs_count": len(inputs),
+        "search_forms_count": len(forms),
+        "search_landmarks_count": len(roles),
+        "search_triggers_count": len({id(el) for el in labelled_triggers + icon_triggers}),
+        "inaccessible_icon_triggers_count": len(inaccessible),
+        "search_inputs_sample": inputs[:3],
     }
 
 
 def extract_context_retention(soup: BeautifulSoup) -> dict:
-    """Detect returning-visitor features: recently viewed, saved items, account anchors, and client storage."""
-    retention_cfg = _CONFIG.get("context_retention", {})
-    patterns = retention_cfg.get("retention_feature_patterns", [
-        "recently-viewed", "history", "wishlist", "saved", "favorites", "recommended-for-you", "for-you", "my-account", "profile"
-    ])
-
-    features_detected = []
-    page_html_lower = str(soup).lower()
-
-    for pat in patterns:
-        if pat in page_html_lower:
-            features_detected.append(pat)
-
-    # Check for account / profile links
-    has_account_link = False
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "").lower()
-        text = a.get_text(separator=" ", strip=True).lower()
-        if any(term in href or term in text for term in ["account", "profile", "dashboard", "sign in", "login"]):
-            has_account_link = True
-            break
-
-    # Check for client-side storage hooks in script text
-    has_client_storage_hooks = any(storage in page_html_lower for storage in ["localstorage", "sessionstorage", "indexeddb"])
-
+    cfg = _CONFIG.get("context_retention", {})
+    patterns = cfg.get("retention_feature_patterns", [])
+    evidence = []
+    for element in soup.find_all(["a", "button", "section", "div"], limit=2000):
+        text = element.get_text(" ", strip=True)[:100] if element.name in ("a", "button") else ""
+        haystack = " ".join(filter(None, [element.get("id"), " ".join(element.get("class") or []), element.get("href") if element.name == "a" else None, element.get("aria-label"), text])).lower()
+        for pattern in patterns:
+            normalized = pattern.replace("-", r"[-_ ]?")
+            if re.search(r"(?:^|\b)" + normalized + r"(?:\b|$)", haystack, re.I):
+                evidence.append(pattern)
+    evidence = list(dict.fromkeys(evidence))
+    script_text = " ".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))[:500000].lower()
+    storage = [item for item in cfg.get("storage_indicators", []) if item in script_text]
+    account = any(item in evidence for item in ("my-account", "profile", "dashboard")) or bool(soup.find("a", href=re.compile(r"/(?:account|profile|login|signin)(?:/|$)", re.I)))
     return {
-        "has_context_retention": bool(features_detected or has_account_link),
-        "features_detected": features_detected[:6],
-        "has_account_link": has_account_link,
-        "has_client_storage_hooks": has_client_storage_hooks,
+        "has_context_retention": bool(evidence or storage or account),
+        "features_detected": evidence[:10],
+        "has_account_link": account,
+        "has_client_storage_hooks": bool(storage),
+        "storage_indicators": storage,
     }
 
 
-def analyze_page(url: str, session: requests.Session) -> dict:
-    """Fetch and extract engagement metrics from a single page."""
-    try:
-        resp = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=True)
-    except Exception as e:
-        return {
-            "url": url,
-            "status_code": 0,
-            "error": f"Failed to fetch {url}: {e}",
-            "navigation": {},
-            "orientation": {},
-            "performance": {},
-            "mobile": {},
-            "ctas": {},
-            "search": {},
-            "context_retention": {},
-        }
-
-    html = resp.text
-    soup = BeautifulSoup(html, "html.parser")
-
-    nav_data = extract_navigation_data(soup, resp.url)
-    orientation_data = extract_orientation_data(soup, resp.url)
-    perf_data = extract_performance_red_flags(soup, resp.url)
-    mobile_data = extract_mobile_readiness(soup)
-    cta_data = extract_calls_to_action(soup)
-    search_data = extract_site_search(soup)
-    context_data = extract_context_retention(soup)
-
+def _base_page(url: str, status_code=0, content_type="", final_url=None, error=None, fetch_status="fetch_error") -> dict:
     return {
-        "url": url,
-        "final_url": resp.url,
-        "status_code": resp.status_code,
-        "content_type": resp.headers.get("Content-Type", ""),
-        "navigation": nav_data,
-        "orientation": orientation_data,
-        "performance": perf_data,
-        "mobile": mobile_data,
-        "ctas": cta_data,
-        "search": search_data,
-        "context_retention": context_data,
+        "url": url, "final_url": final_url or url, "status_code": status_code,
+        "content_type": content_type or "", "fetch_status": fetch_status,
+        "html_success": False, "error": error,
+        "navigation": {}, "orientation": {}, "performance": {}, "mobile": {},
+        "ctas": {}, "search": {}, "context_retention": {}, "page_profile": {},
+    }
+
+
+def analyze_html_page(url: str, html: str, status_code: int = 200, content_type: str = "text/html", final_url=None) -> dict:
+    """Extract one already-fetched page; useful for cached orchestrator HTML."""
+    page = _base_page(url, status_code, content_type, final_url, fetch_status="http_error")
+    if status_code < 200 or status_code >= 300:
+        page["fetch_status"] = "blocked" if status_code in _BLOCKED_STATUS else "http_error"
+        page["error"] = f"HTTP {status_code}"
+        return page
+    ctype = (content_type or "").lower()
+    if ctype and "html" not in ctype and "xhtml" not in ctype:
+        page["fetch_status"] = "non_html"
+        page["error"] = f"Non-HTML content type: {content_type}"
+        return page
+    if not html or not html.strip():
+        page["fetch_status"] = "empty"
+        page["error"] = "Empty HTML response"
+        return page
+    lower_sample = html[:200000].lower()
+    marker = next((item for item in _BLOCK_MARKERS if item in lower_sample), None)
+    if marker and len(BeautifulSoup(html, "html.parser").get_text(" ", strip=True)) < 5000:
+        page["fetch_status"] = "blocked"
+        page["error"] = f"Probable interstitial/block page ({marker})"
+        return page
+
+    soup = BeautifulSoup(html, "html.parser")
+    page.update({
+        "fetch_status": "success", "html_success": True, "error": None,
+        "html_bytes": len(html.encode("utf-8", errors="ignore")),
+        "navigation": extract_navigation_data(soup, final_url or url),
+        "orientation": extract_orientation_data(soup, final_url or url),
+        "performance": extract_performance_red_flags(soup, final_url or url),
+        "mobile": extract_mobile_readiness(soup),
+        "ctas": extract_calls_to_action(soup),
+        "search": extract_site_search(soup),
+        "context_retention": extract_context_retention(soup),
+        "page_profile": _page_profile(soup, final_url or url),
+    })
+    return page
+
+
+def analyze_page(url: str, session: requests.Session) -> dict:
+    try:
+        response = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=True)
+    except Exception as exc:
+        return _base_page(url, error=f"Fetch failed: {str(exc)[:300]}")
+    return analyze_html_page(url, response.text, response.status_code, response.headers.get("Content-Type", ""), response.url)
+
+
+def build_raw(base_url: str, paths, session: requests.Session, max_pages: int = _DEFAULT_MAX_PAGES) -> dict:
+    """Fetch and extract a bounded page set for ``EngagementValidator``.
+
+    ``paths`` accepts paths or absolute URLs. ``session`` is any requests-compatible
+    session, including the orchestrator's cached SafeSession.
+    """
+    base_url = _normalize_base(base_url)
+    try:
+        limit = max(0, int(max_pages))
+    except (TypeError, ValueError):
+        limit = _DEFAULT_MAX_PAGES
+    urls, seen = [], set()
+    if isinstance(paths, str):
+        paths = paths.split(",") if paths else []
+    for candidate in [base_url] + list(paths or []):
+        if candidate is None:
+            continue
+        candidate = str(candidate).strip()
+        if not candidate:
+            continue
+        full = urljoin(base_url, candidate)
+        canonical = full.split("#", 1)[0]
+        if canonical not in seen:
+            seen.add(canonical)
+            urls.append(canonical)
+    pages = [analyze_page(url, session) for url in urls[:limit]]
+    successful = sum(page.get("html_success") is True for page in pages)
+    return {
+        "site": base_url,
+        "audited_at": datetime.now(timezone.utc).isoformat(),
+        "total_pages_audited": len(pages),
+        "successful_html_pages": successful,
+        "skipped_pages": len(pages) - successful,
+        "pages": pages,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract on-site engagement, navigation, and UX metrics.")
-    parser.add_argument("--url", required=True, help="Site root URL (e.g. https://example.com)")
-    parser.add_argument("--pages", default="", help="Comma-separated paths or URLs to audit")
-    parser.add_argument("--max-pages", type=int, default=_DEFAULT_MAX_PAGES, help="Max pages to inspect")
-    parser.add_argument("--output", default="", help="Optional file path to write JSON output")
+    parser = argparse.ArgumentParser(description="Extract engagement and UX signals from HTML pages.")
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--pages", default="", help="Comma-separated paths or URLs")
+    parser.add_argument("--max-pages", type=int, default=_DEFAULT_MAX_PAGES)
+    parser.add_argument("--output", default="")
     args = parser.parse_args()
-
-    base_url = args.url.strip()
-    if not base_url.startswith(("http://", "https://")):
-        base_url = "https://" + base_url
-
-    urls_to_check = [base_url]
-    if args.pages:
-        for p in args.pages.split(","):
-            p = p.strip()
-            if not p:
-                continue
-            full = urljoin(base_url, p)
-            if full not in urls_to_check:
-                urls_to_check.append(full)
-
-    urls_to_check = urls_to_check[:args.max_pages]
-
     session = requests.Session()
     session.headers.update({"User-Agent": _USER_AGENT})
-
-    pages_output = []
-    for u in urls_to_check:
-        page_res = analyze_page(u, session)
-        pages_output.append(page_res)
-
-    final_report = {
-        "site": base_url,
-        "audited_at": datetime.now(timezone.utc).isoformat(),
-        "total_pages_audited": len(pages_output),
-        "pages": pages_output,
-    }
-
-    output_json = json.dumps(final_report, indent=2)
+    raw = build_raw(args.url, args.pages.split(",") if args.pages else [], session, args.max_pages)
+    output = json.dumps(raw, indent=2, ensure_ascii=False)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_json)
+            f.write(output)
     else:
-        print(output_json)
+        print(output)
 
 
 if __name__ == "__main__":

@@ -290,7 +290,10 @@ def analyze(url: str, critical_paths: list) -> dict:
             result["ai_search_bots_blocked"].append({**record, "impact": bot_info["impact"]})
         elif root["blocked"] and bot_info["category"] == "training_bot":
             result["ai_training_bots_blocked"].append(record)
-        if bot_info["category"] != "training_bot":
+        # A root block already proves all descendant paths are unavailable and is
+        # reported by CA-01. Do not manufacture a duplicate CA-02 for every configured
+        # critical path; CA-02 is reserved for narrower path-specific rules.
+        if bot_info["category"] != "training_bot" and not root["blocked"]:
             for path in critical_paths:
                 if not is_suppressed_path(path) and evaluate_bot(groups, bot, path)["blocked"]:
                     result["critical_path_blocks"].append({"user_agent": bot, "path": path, "bot_category": bot_info["category"]})

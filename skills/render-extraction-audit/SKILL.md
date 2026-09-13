@@ -11,6 +11,7 @@ description: >
   (boilerplate-heavy pages). Each finding includes evidence and severity escalated
   by key-fact classification (pricing, contact, product identity).
 license: MIT
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Render-Extraction Audit

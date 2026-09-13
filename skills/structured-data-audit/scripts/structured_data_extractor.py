@@ -203,8 +203,26 @@ def extract_visible_cues(soup: BeautifulSoup) -> dict:
     body = soup.find("body")
     text = body.get_text(separator=" ", strip=True) if body else ""
 
-    # Potential price mentions
-    prices = list(set(re.findall(r"[\$€£¥₹]\s*\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:USD|EUR|GBP|INR)\b", text)))[:10]
+    # Potential commerce mentions. Keep the original string list for compatibility,
+    # and expose normalized cues for deterministic Offer/AggregateRating checks.
+    price_pattern = r"(?:[$€£¥₹]\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|INR|JPY|CAD|AUD)\b)"
+    prices = list(dict.fromkeys(re.findall(price_pattern, text, re.IGNORECASE)))[:10]
+    currency_tokens = re.findall(r"\b(?:USD|EUR|GBP|INR|JPY|CAD|AUD)\b|[$€£¥₹]", text, re.IGNORECASE)
+    # `$` and `¥` are intentionally not mapped: each can represent multiple currencies.
+    currency_map = {"€": "EUR", "£": "GBP", "₹": "INR"}
+    currencies = list(dict.fromkeys(
+        currency_map.get(c, c.upper()) for c in currency_tokens
+        if c.isalpha() or c in currency_map
+    ))[:8]
+    availability_terms = list(dict.fromkeys(
+        m.lower() for m in re.findall(
+            r"\b(?:in stock|out of stock|sold out|pre-?order|back-?order|available online|unavailable)\b",
+            text, re.IGNORECASE)
+    ))[:8]
+    rating_matches = re.findall(
+        r"\b([0-5](?:\.\d+)?)\s*(?:/\s*5|out of 5|stars?)\b|\b(?:rated|rating)\s*[:\-]?\s*([0-5](?:\.\d+)?)\b",
+        text, re.IGNORECASE)
+    ratings = list(dict.fromkeys(a or b for a, b in rating_matches if a or b))[:8]
 
     # Potential date mentions
     dates = list(set(re.findall(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", text)))[:5]
@@ -218,11 +236,14 @@ def extract_visible_cues(soup: BeautifulSoup) -> dict:
         "h1": h1s,
         "h2_sample": h2s,
         "detected_prices": prices,
+        "detected_currencies": currencies,
+        "detected_availability": availability_terms,
+        "detected_ratings": ratings,
         "detected_dates": dates,
         "has_faq_content": has_faq_content,
         "faq_headings": faq_headings,
         "body_char_count": len(text),
-        "text_sample": text[:350],
+        "text_sample": text[:2000],
     }
 
 

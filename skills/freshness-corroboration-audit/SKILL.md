@@ -9,6 +9,7 @@ description: >
   multi-source corroboration of core claims, entity disambiguation (sameAs links,
   NAP consistency, brand collisions), and Wikipedia/Wikidata grounding anchors.
 license: MIT
+allowed-tools: "run_command read_url_content view_file"
 ---
 
 # Freshness & Corroboration Audit
