@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    ".",
+    "lib",
+    "skills"
+  ],
+  "extraPaths": [
+    "lib",
+    "skills/audit-orchestrator/scripts",
+    "skills/crawl-access-audit/scripts",
+    "skills/render-extraction-audit/scripts",
+    "skills/structured-data-audit/scripts",
+    "skills/freshness-corroboration-audit/scripts",
+    "skills/engagement-audit/scripts"
+  ]
+}

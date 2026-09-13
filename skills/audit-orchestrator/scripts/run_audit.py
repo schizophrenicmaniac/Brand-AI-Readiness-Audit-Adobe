@@ -226,14 +226,13 @@ def audit(raw_url, max_pages=8, budget_seconds=240, allow_private=False):
         raw_html = html_fetcher.analyze(home, page_paths=chosen, max_pages=max_pages)
         rendered = None
         try:
+            import playwright  # noqa: F401 - probe for playwright before importing extractor
             import rendered_dom_extractor
             rendered = rendered_dom_extractor.analyze(home, page_paths=chosen,
                                                       max_pages=max_pages, raw_data=raw_html)
             coverage["render_available"] = True
-        except SystemExit:
-            rendered = None       # Playwright not installed -> static-only
-        except Exception:
-            rendered = None
+        except (ImportError, SystemExit, Exception):
+            rendered = None       # Playwright not installed -> degrade cleanly to static-only
         return render_analyzer.compile_findings(raw_html, rendered)
     findings += _run_skill("render-extraction-audit", _render, coverage)
 
@@ -289,65 +288,88 @@ def _proactive(findings):
 
 
 # ---------------------------------------------------------------------------
-# Markdown rendering (non-expert-friendly)
+# Professional Markdown Report Formatting
 # ---------------------------------------------------------------------------
-_SEV_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "⚪", "info": "🔵"}
-
 
 def to_markdown(report):
     s = report["summary"]
+    audited_time = report.get("audited_at", "")
+    try:
+        dt = datetime.fromisoformat(audited_time)
+        formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        formatted_date = audited_time
+
     lines = [
-        f"# Brand AI Readiness Audit — {report['site']}",
+        f"# Brand AI Readiness Audit Report",
         "",
-        f"*Audited: {report['audited_at']} · Pages audited: {report.get('pages_audited', 0)}*",
+        f"**Target Site:** `{report['site']}`  ",
+        f"**Audited At:** {formatted_date}  ",
+        f"**Pages Audited:** {report.get('pages_audited', 0)}  ",
         "",
-        "## Summary",
+        "---",
         "",
-        f"- **Total findings:** {s['total_findings']}",
-        f"- 🔴 Critical: {s.get('critical', 0)}  ·  🟠 High: {s.get('high', 0)}  ·  "
-        f"🟡 Medium: {s.get('medium', 0)}  ·  ⚪ Low: {s.get('low', 0)}  ·  🔵 Info: {s.get('info', 0)}",
+        "## Executive Summary",
+        "",
+        "| Severity | Findings | Priority | Action Guidance |",
+        "| :--- | :---: | :---: | :--- |",
+        f"| **Critical** | {s.get('critical', 0)} | P0 | Immediate blocker for machine discovery or brand safety |",
+        f"| **High** | {s.get('high', 0)} | P1 | High impact on AI visibility, citation, or conversion |",
+        f"| **Medium** | {s.get('medium', 0)} | P2 | Material friction in crawling, freshness, or schema depth |",
+        f"| **Low** | {s.get('low', 0)} | P3 | Quality hygiene, minor schema, or edge optimization |",
+        f"| **Info** | {s.get('info', 0)} | P3 | Informational observation or positive verification |",
+        f"| **Total** | **{s['total_findings']}** | - | - |",
+        "",
+        "---",
         "",
     ]
     cov = report.get("coverage", {})
     lines += [
-        "## Coverage",
+        "## Audit Scope & Coverage",
         "",
-        f"- Pages selected: {len(cov.get('pages_selected', []))}",
-        f"- Checks run: {', '.join(cov.get('checks_run', [])) or 'none'}",
-        f"- Rendering (headless browser) available: {cov.get('render_available', False)}",
+        f"- **Audited Pages:** {len(cov.get('pages_selected', []))} pages analyzed",
+        f"- **Detection Skills Executed:** {', '.join(cov.get('checks_run', [])) or 'None'}",
+        f"- **Headless Browser Rendering:** {'Enabled (Playwright)' if cov.get('render_available') else 'Static Analysis Only'}",
     ]
     if cov.get("deadline_hit"):
-        lines.append(f"- ⚠️ Time budget reached — partial report. Incomplete: "
-                     f"{', '.join(cov.get('incomplete', [])) or 'n/a'}")
+        lines.append(f"- **Notice:** Global time budget reached. Incomplete checks: "
+                     f"{', '.join(cov.get('incomplete', [])) or 'N/A'}")
     if cov.get("skipped_auth_action"):
-        lines.append(f"- Skipped (auth/action pages, not fetched): {len(cov['skipped_auth_action'])}")
+        lines.append(f"- **Excluded Paths (Auth/Conversion Safety):** {len(cov['skipped_auth_action'])} URLs skipped")
     if cov.get("errors"):
-        lines.append(f"- Errors: {'; '.join(cov['errors'])}")
+        lines.append(f"- **Execution Notes:** {'; '.join(cov['errors'])}")
+    lines.append("")
+    lines.append("---")
     lines.append("")
 
-    lines += ["## Findings", ""]
-    if not report["findings"]:
-        lines.append("_No findings._")
-    for f in report["findings"]:
-        sev = f["severity"]
-        act = f["suggested_action"]
-        ev = f["evidence"]
+    lines += ["## Detailed Findings", ""]
+    if not report.get("findings"):
+        lines.append("_No findings identified. The audited properties meet baseline criteria._")
+        lines.append("")
+    for f in report.get("findings", []):
+        sev = f["severity"].upper()
+        act = f.get("suggested_action", {})
+        ev = f.get("evidence", {})
+        priority = act.get("priority", "P3")
+
+        expected_str = f" *(Expected: `{ev['expected']}`)*" if ev.get("expected") else ""
         lines += [
-            f"### {_SEV_EMOJI.get(sev, '')} [{sev.upper()} · {act['priority']}] {f['title']}",
+            f"### [{sev} | {priority}] {f['title']}",
             "",
-            f"- **Skill:** {f.get('skill', '')}  ·  **ID:** `{f['id']}`",
-            f"- **Evidence:** `{ev.get('locator') or ev.get('source')}` on {ev.get('url')} — "
-            f"{ev.get('observed', '')}"
-            + (f" (expected: {ev['expected']})" if ev.get("expected") else ""),
-            f"- **Fix:** {act['summary']}",
+            f"- **Severity:** {f['severity'].capitalize()} (`{priority}`)",
+            f"- **Skill:** `{f.get('skill', '')}`  |  **Finding ID:** `{f['id']}`",
+            f"- **Target URL:** {ev.get('url', '')}",
+            f"- **Evidence:** `{ev.get('locator') or ev.get('source', '')}` - {ev.get('observed', '')}{expected_str}",
+            f"- **Remediation:** {act.get('summary', '')}",
             "",
         ]
 
     if report.get("proactive_improvements"):
-        lines += ["## Proactive improvements", ""]
+        lines += ["---", "", "## Strategic Proactive Opportunities", ""]
         for p in report["proactive_improvements"]:
-            lines.append(f"- **{p.get('title')}** — {p.get('summary')}")
-        lines.append("")
+            lines.append(f"#### {p.get('title')}")
+            lines.append(f"{p.get('summary')}")
+            lines.append("")
     return "\n".join(lines)
 
 
